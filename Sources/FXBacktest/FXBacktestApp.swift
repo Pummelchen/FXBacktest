@@ -9,6 +9,9 @@ struct FXBacktestApp: App {
             ContentView()
                 .environmentObject(model)
                 .frame(minWidth: 1180, minHeight: 760)
+                .task {
+                    model.startTerminalCommandShellIfNeeded()
+                }
         }
         .commands {
             CommandGroup(after: .newItem) {

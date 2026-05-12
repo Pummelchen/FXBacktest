@@ -12,6 +12,7 @@ The goal is similar to the MT5 Strategy Tester optimization view: define a matri
 - Optional Metal execution for plugins that provide a matching Metal compute kernel.
 - Read-only FXExport data loading through the dedicated FXBacktest API v1.
 - Live pass table with profit, drawdown, trades, win rate, profit factor, and parameters.
+- Resident terminal command shell with `>` prompt for loading data, changing settings, starting runs, stopping active work, and checking status without relaunching.
 - Demo data mode for UI and engine testing when the FXExport API is not running.
 
 ## Repository Layout
@@ -86,6 +87,14 @@ Release builds are the relevant performance baseline because SwiftPM uses whole-
 swift run FXBacktest
 ```
 
+Do not pass launch-time parameters. FXBacktest starts the SwiftUI backtester and a resident terminal prompt:
+
+```text
+> 
+```
+
+Paste commands into that prompt while the app keeps running. Status messages continue to print to the terminal, and the SwiftUI live table updates at the same time.
+
 The first screen is the working backtester, not a setup wizard. It includes:
 
 - EA plugin picker.
@@ -105,6 +114,13 @@ Use this when the FXExport API is not running.
 4. Keep `CPU` selected.
 5. Adjust parameter ranges if needed.
 6. Click `Run`.
+
+The same flow from the terminal prompt is:
+
+```text
+> load-demo
+> run cpu
+```
 
 The pass table updates live and sorts the best results by net profit.
 
@@ -143,7 +159,40 @@ Then in FXBacktest:
 8. Edit the parameter matrix.
 9. Click `Run`.
 
+The same flow from the FXBacktest terminal prompt is:
+
+```text
+> load-fxexport --api-url http://127.0.0.1:5066 --broker icmarkets-sc-mt5-4 --symbol EURUSD --mt5-symbol EURUSD --digits 5 --from 1704067200 --to 1707177600 --max-rows 5000000
+> set-param fast_period --input 12 --min 6 --step 2 --max 40
+> set-param slow_period --input 48 --min 24 --step 4 --max 120
+> run cpu --workers 8 --chunk 128
+```
+
 If FXExport reports missing verified coverage, bad hashes, mixed digits, duplicate timestamps, invalid OHLC rows, or unsafe ingestion state, FXBacktest fails closed instead of running against questionable data.
+
+## Terminal Command Shell
+
+FXBacktest is intended to stay open. If no backtest is active, it waits at the `>` prompt for the next command. State-changing commands gracefully stop active data loads or optimization runs before changing the app state.
+
+Useful commands:
+
+```text
+status
+config
+plugins
+plugin <plugin-id-or-display-name>
+params
+set <field> <value>
+set --api-url http://127.0.0.1:5066 --target cpu --workers 8
+set-param <key> --input 12 --min 6 --step 2 --max 40
+load-demo
+load-fxexport [--api-url URL] [--broker ID] [--symbol EURUSD] [--mt5-symbol EURUSD] [--digits 5] [--from UTC] [--to UTC] [--max-rows N]
+run [cpu|metal] [--workers N] [--chunk N] [--initial-deposit N] [--contract-size N] [--lot N]
+stop
+reset-params
+help
+exit
+```
 
 ## FXExport Data Contract
 
