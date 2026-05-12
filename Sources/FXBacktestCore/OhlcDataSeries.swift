@@ -61,6 +61,9 @@ public struct OhlcDataSeries: Sendable {
         low: ContiguousArray<Int64>,
         close: ContiguousArray<Int64>
     ) throws {
+        guard (0...10).contains(metadata.digits) else {
+            throw FXBacktestError.invalidMarketData("Price digits must be in 0...10.")
+        }
         let rowCount = utcTimestamps.count
         guard open.count == rowCount, high.count == rowCount, low.count == rowCount, close.count == rowCount else {
             throw FXBacktestError.invalidMarketData("OHLC columns must have equal length.")

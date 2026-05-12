@@ -86,14 +86,27 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     }
 
     func selectPlugin(_ pluginID: String) {
+        guard !isRunning, !isLoadingData else {
+            updateStatus("Stop active work before selecting a plugin", log: .warning)
+            return
+        }
         selectedPluginID = pluginID
         parameterRows = Self.rows(for: selectedPlugin)
         results = []
         progress = BacktestProgress(completedPasses: 0, totalPasses: 0, elapsedSeconds: 0)
-        updateStatus("Selected \(selectedPlugin.descriptor.displayName)")
+        if executionTarget == .metal, selectedPlugin.metalKernel == nil {
+            executionTarget = .cpu
+            updateStatus("Selected \(selectedPlugin.descriptor.displayName); switched to CPU because this plugin has no Metal kernel", log: .warning)
+        } else {
+            updateStatus("Selected \(selectedPlugin.descriptor.displayName)")
+        }
     }
 
     func loadDemoData() {
+        guard !isRunning, !isLoadingData else {
+            updateStatus("Stop active work before loading demo data", log: .warning)
+            return
+        }
         do {
             market = try OhlcDataSeries.demoEURUSD()
             results = []
@@ -110,8 +123,18 @@ final class AppModel: ObservableObject, @unchecked Sendable {
             updateStatus("FXExport data load is already running", log: .warning)
             return
         }
+        guard !isRunning else {
+            updateStatus("Stop active optimization before loading FXExport data", log: .warning)
+            return
+        }
         guard let url = URL(string: apiURLText) else {
             updateStatus("Invalid FXExport API URL", log: .error)
+            return
+        }
+        do {
+            try validateCurrentDataRequest()
+        } catch {
+            updateStatus(String(describing: error), log: .error)
             return
         }
         isLoadingData = true
@@ -176,6 +199,10 @@ final class AppModel: ObservableObject, @unchecked Sendable {
 
         let sweep: ParameterSweep
         do {
+            try validateCurrentRunSettings()
+            if executionTarget == .metal, selectedPlugin.metalKernel == nil {
+                throw FXBacktestError.metalKernelMissing(plugin: selectedPlugin.descriptor.displayName)
+            }
             sweep = try makeSweep()
         } catch {
             updateStatus(String(describing: error), log: .error)
@@ -302,6 +329,45 @@ final class AppModel: ObservableObject, @unchecked Sendable {
                 maximum: $0.maximum
             )
         })
+    }
+
+    private func validateCurrentDataRequest() throws {
+        guard !brokerSourceId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw FXBacktestError.invalidParameter("Broker source id must not be empty.")
+        }
+        guard !logicalSymbol.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw FXBacktestError.invalidParameter("Logical symbol must not be empty.")
+        }
+        guard (0...10).contains(expectedDigits) else {
+            throw FXBacktestError.invalidParameter("Expected digits must be in 0...10.")
+        }
+        guard utcStartInclusive < utcEndExclusive else {
+            throw FXBacktestError.invalidParameter("UTC start must be earlier than UTC end.")
+        }
+        guard utcStartInclusive % 60 == 0, utcEndExclusive % 60 == 0 else {
+            throw FXBacktestError.invalidParameter("UTC start and end must be minute-aligned.")
+        }
+        guard maximumRows > 0 else {
+            throw FXBacktestError.invalidParameter("Maximum rows must be > 0.")
+        }
+    }
+
+    private func validateCurrentRunSettings() throws {
+        guard maxWorkers > 0 else {
+            throw FXBacktestError.invalidParameter("Workers must be > 0.")
+        }
+        guard chunkSize > 0 else {
+            throw FXBacktestError.invalidParameter("Chunk size must be > 0.")
+        }
+        guard initialDeposit.isFinite, initialDeposit > 0 else {
+            throw FXBacktestError.invalidParameter("Initial deposit must be a finite value > 0.")
+        }
+        guard contractSize.isFinite, contractSize > 0 else {
+            throw FXBacktestError.invalidParameter("Contract size must be a finite value > 0.")
+        }
+        guard lotSize.isFinite, lotSize > 0 else {
+            throw FXBacktestError.invalidParameter("Lot size must be a finite value > 0.")
+        }
     }
 
     private static func rows(for plugin: AnyFXBacktestPlugin) -> [ParameterInputRow] {
@@ -569,7 +635,10 @@ extension AppModel {
         case "target":
             _ = try parseTarget(value)
         case "initial-deposit", "contract-size", "lot":
-            _ = try parseDouble(value, name: key, minimum: 0)
+            let parsed = try parseDouble(value, name: key, minimum: 0)
+            guard parsed > 0 else {
+                throw TerminalCommandError.invalidValue("\(key) must be > 0.")
+            }
         default:
             throw TerminalCommandError.unknownOption(key)
         }

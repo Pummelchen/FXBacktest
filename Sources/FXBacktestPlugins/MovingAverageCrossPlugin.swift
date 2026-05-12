@@ -7,7 +7,8 @@ public struct MovingAverageCrossPlugin: FXBacktestPluginV1 {
         displayName: "Moving Average Cross",
         version: "1.0.0",
         summary: "Reference EA plugin that opens long/short positions on fast/slow moving-average crossovers.",
-        author: "FXBacktest"
+        author: "FXBacktest",
+        supportsMetal: true
     )
 
     public let parameterDefinitions: [ParameterDefinition]

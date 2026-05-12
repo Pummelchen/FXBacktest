@@ -32,4 +32,19 @@ final class FXExportAPIDataSeriesTests: XCTestCase {
         XCTAssertEqual(series.open[0], 108_000)
         XCTAssertEqual(series.close[1], 108_020)
     }
+
+    func testOhlcDataSeriesRejectsInvalidDigits() throws {
+        XCTAssertThrowsError(try OhlcDataSeries(
+            metadata: FXBacktestMarketMetadata(
+                brokerSourceId: "demo",
+                logicalSymbol: "EURUSD",
+                digits: -1
+            ),
+            utcTimestamps: [1_704_067_200],
+            open: [108_000],
+            high: [108_010],
+            low: [107_990],
+            close: [108_005]
+        ))
+    }
 }

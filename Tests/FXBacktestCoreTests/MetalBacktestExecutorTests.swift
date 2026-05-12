@@ -7,6 +7,13 @@ import Metal
 #endif
 
 final class MetalBacktestExecutorTests: XCTestCase {
+    func testMovingAverageCrossAdvertisesMetalSupport() {
+        let plugin = MovingAverageCrossPlugin()
+
+        XCTAssertTrue(plugin.descriptor.supportsMetal)
+        XCTAssertNotNil(plugin.metalKernel)
+    }
+
     func testMetalExecutorCompilesPluginKernelAndRunsPassesWhenAvailable() async throws {
         #if canImport(Metal)
         guard MTLCreateSystemDefaultDevice() != nil else {

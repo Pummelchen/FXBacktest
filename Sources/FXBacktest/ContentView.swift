@@ -25,6 +25,7 @@ struct ContentView: View {
             }
             .listStyle(.sidebar)
             .navigationTitle("FXBacktest")
+            .disabled(model.isRunning || model.isLoadingData)
         } detail: {
             VStack(spacing: 0) {
                 toolbar
@@ -103,6 +104,11 @@ struct ContentView: View {
                         }
                     }
                     GridRow {
+                        Text("Digits")
+                        TextField("Expected digits", value: $model.expectedDigits, format: .number)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    GridRow {
                         Text("UTC Start")
                         TextField("Start", value: $model.utcStartInclusive, format: .number)
                             .textFieldStyle(.roundedBorder)
@@ -110,6 +116,11 @@ struct ContentView: View {
                     GridRow {
                         Text("UTC End")
                         TextField("End", value: $model.utcEndExclusive, format: .number)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    GridRow {
+                        Text("Max Rows")
+                        TextField("Maximum rows", value: $model.maximumRows, format: .number)
                             .textFieldStyle(.roundedBorder)
                     }
                 }
@@ -127,7 +138,7 @@ struct ContentView: View {
                     } label: {
                         Label("Demo", systemImage: "chart.line.uptrend.xyaxis")
                     }
-                    .disabled(model.isRunning)
+                    .disabled(model.isRunning || model.isLoadingData)
                 }
 
                 if let market = model.market {
@@ -145,6 +156,7 @@ struct ContentView: View {
                 Picker("Engine", selection: $model.executionTarget) {
                     ForEach(BacktestExecutionTarget.allCases) { target in
                         Text(target.rawValue.uppercased()).tag(target)
+                            .disabled(target == .metal && model.selectedPlugin.metalKernel == nil)
                     }
                 }
                 .pickerStyle(.segmented)
@@ -164,6 +176,11 @@ struct ContentView: View {
                     GridRow {
                         Text("Initial")
                         TextField("Deposit", value: $model.initialDeposit, format: .number)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    GridRow {
+                        Text("Contract")
+                        TextField("Contract", value: $model.contractSize, format: .number)
                             .textFieldStyle(.roundedBorder)
                     }
                     GridRow {
@@ -193,6 +210,7 @@ struct ContentView: View {
                 }
             }
         }
+        .disabled(model.isRunning)
     }
 
     private var parameterPanel: some View {
@@ -227,6 +245,7 @@ struct ContentView: View {
                 }
             }
         }
+        .disabled(model.isRunning)
     }
 
     private var resultPanel: some View {

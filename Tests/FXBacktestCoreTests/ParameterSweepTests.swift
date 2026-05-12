@@ -33,4 +33,47 @@ final class ParameterSweepTests: XCTestCase {
         XCTAssertEqual(try sweep.parameterVector(at: 3).values, [2, 15])
         XCTAssertEqual(try sweep.parameterVector(at: 8).values, [4, 20])
     }
+
+    func testRejectsInvalidAndNonFiniteParameterDimensions() throws {
+        let integer = try ParameterDefinition(
+            key: "period",
+            displayName: "Period",
+            defaultValue: 2,
+            defaultMinimum: 1,
+            defaultStep: 1,
+            defaultMaximum: 10,
+            valueKind: .integer
+        )
+        XCTAssertThrowsError(try ParameterSweepDimension(
+            definition: integer,
+            input: 2.5,
+            minimum: 1,
+            step: 1,
+            maximum: 10
+        ))
+        XCTAssertThrowsError(try ParameterSweepDimension(
+            definition: integer,
+            input: 2,
+            minimum: 1,
+            step: .infinity,
+            maximum: 10
+        ))
+
+        let decimal = try ParameterDefinition(
+            key: "lots",
+            displayName: "Lots",
+            defaultValue: 0.1,
+            defaultMinimum: 0.1,
+            defaultStep: 0.1,
+            defaultMaximum: 1,
+            valueKind: .decimal
+        )
+        XCTAssertThrowsError(try ParameterSweepDimension(
+            definition: decimal,
+            input: 0.1,
+            minimum: 0.1,
+            step: 0,
+            maximum: 1
+        ))
+    }
 }

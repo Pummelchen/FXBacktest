@@ -57,6 +57,19 @@ public struct ParameterSweepDimension: Identifiable, Codable, Hashable, Sendable
     }
 
     public var valueCount: UInt64 {
+        (try? checkedValueCount()) ?? 0
+    }
+
+    fileprivate func checkedValueCount() throws -> UInt64 {
+        guard minimum.isFinite, step.isFinite, maximum.isFinite else {
+            throw FXBacktestError.invalidParameter("\(definition.key): min, step, and max must be finite numbers.")
+        }
+        guard minimum <= maximum else {
+            throw FXBacktestError.invalidParameter("\(definition.key): minimum must be <= maximum.")
+        }
+        guard step > 0 else {
+            throw FXBacktestError.invalidParameter("\(definition.key): step must be > 0.")
+        }
         if definition.valueKind == .boolean {
             return minimum == maximum ? 1 : 2
         }
@@ -64,7 +77,11 @@ public struct ParameterSweepDimension: Identifiable, Codable, Hashable, Sendable
         if span == 0 {
             return 1
         }
-        return UInt64(floor((span / step) + 1.0e-9)) + 1
+        let count = floor((span / step) + 1.0e-9) + 1
+        guard count.isFinite, count > 0, count <= Double(UInt64.max) else {
+            throw FXBacktestError.invalidParameter("\(definition.key): parameter value count is too large.")
+        }
+        return UInt64(count)
     }
 
     public func value(at offset: UInt64) -> Double {
@@ -83,12 +100,10 @@ public struct ParameterSweepDimension: Identifiable, Codable, Hashable, Sendable
         }
     }
 
-    private func validate() throws {
-        guard minimum <= maximum else {
-            throw FXBacktestError.invalidParameter("\(definition.key): minimum must be <= maximum.")
-        }
-        guard step > 0 else {
-            throw FXBacktestError.invalidParameter("\(definition.key): step must be > 0.")
+    fileprivate func validate() throws {
+        _ = try checkedValueCount()
+        guard input.isFinite else {
+            throw FXBacktestError.invalidParameter("\(definition.key): input must be a finite number.")
         }
         guard input >= minimum, input <= maximum else {
             throw FXBacktestError.invalidParameter("\(definition.key): input must be inside the optimization range.")
@@ -96,6 +111,12 @@ public struct ParameterSweepDimension: Identifiable, Codable, Hashable, Sendable
         if definition.valueKind == .boolean {
             guard [0, 1].contains(minimum), [0, 1].contains(maximum), [0, 1].contains(input) else {
                 throw FXBacktestError.invalidParameter("\(definition.key): boolean parameters must use 0 or 1.")
+            }
+        }
+        if definition.valueKind == .integer {
+            let values = [("input", input), ("minimum", minimum), ("step", step), ("maximum", maximum)]
+            for (label, value) in values where value.rounded() != value {
+                throw FXBacktestError.invalidParameter("\(definition.key): \(label) must be an integer value.")
             }
         }
     }
@@ -158,7 +179,8 @@ public struct ParameterSweep: Codable, Hashable, Sendable {
         var localRadices: [UInt64] = []
         localRadices.reserveCapacity(dimensions.count)
         for dimension in dimensions {
-            let count = dimension.valueCount
+            try dimension.validate()
+            let count = try dimension.checkedValueCount()
             guard count > 0 else {
                 throw FXBacktestError.invalidSweep("\(dimension.definition.key) has no values.")
             }
