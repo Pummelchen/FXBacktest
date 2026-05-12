@@ -3,8 +3,24 @@ import Foundation
 public enum BacktestExecutionTarget: String, Codable, CaseIterable, Identifiable, Sendable {
     case cpu
     case metal
+    case both
 
     public var id: String { rawValue }
+
+    public var requiresMetalKernel: Bool {
+        self == .metal || self == .both
+    }
+
+    public var displayName: String {
+        switch self {
+        case .cpu:
+            return "CPU"
+        case .metal:
+            return "GPU (Metal)"
+        case .both:
+            return "Both"
+        }
+    }
 }
 
 public struct BacktestRunSettings: Codable, Hashable, Sendable {

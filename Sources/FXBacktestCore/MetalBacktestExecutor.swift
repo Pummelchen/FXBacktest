@@ -100,7 +100,7 @@ private struct MetalRunConfig: Sendable {
     var digits: UInt32
 }
 
-private final class MetalKernelRunner {
+final class MetalKernelRunner: @unchecked Sendable {
     private let kernel: MetalKernelV1
     private let market: OhlcDataSeries
     private let device: MTLDevice

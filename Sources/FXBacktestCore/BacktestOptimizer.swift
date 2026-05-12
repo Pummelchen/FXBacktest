@@ -23,6 +23,8 @@ public struct BacktestOptimizer: Sendable {
             CPUBacktestExecutor().run(plugin: plugin, marketUniverse: marketUniverse, sweep: sweep, settings: settings)
         case .metal:
             MetalBacktestExecutor().run(plugin: plugin, market: marketUniverse.primary, sweep: sweep, settings: settings)
+        case .both:
+            HybridBacktestExecutor().run(plugin: plugin, marketUniverse: marketUniverse, sweep: sweep, settings: settings)
         }
     }
 }

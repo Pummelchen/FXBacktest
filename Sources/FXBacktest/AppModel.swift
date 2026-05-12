@@ -145,9 +145,9 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         lastRunSettings = nil
         resultInitialDeposit = initialDeposit
         progress = BacktestProgress(completedPasses: 0, totalPasses: 0, elapsedSeconds: 0)
-        if executionTarget == .metal, selectedPlugin.metalKernel == nil {
+        if executionTarget.requiresMetalKernel, selectedPlugin.metalKernel == nil {
             executionTarget = .cpu
-            updateStatus("Selected \(selectedPlugin.descriptor.displayName); switched to CPU because this plugin has no Metal kernel", log: .warning)
+            updateStatus("Selected \(selectedPlugin.descriptor.displayName); switched to CPU because this plugin has no Metal execution path", log: .warning)
         } else {
             updateStatus("Selected \(selectedPlugin.descriptor.displayName)")
         }
@@ -266,7 +266,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         let sweep: ParameterSweep
         do {
             try validateCurrentRunSettings()
-            if executionTarget == .metal, selectedPlugin.metalKernel == nil {
+            if executionTarget.requiresMetalKernel, selectedPlugin.metalKernel == nil {
                 throw FXBacktestError.metalKernelMissing(plugin: selectedPlugin.descriptor.displayName)
             }
             sweep = try makeSweep()
@@ -700,12 +700,12 @@ extension AppModel {
           plugin <plugin-id-or-display-name>
           params
           set <field> <value>
-          set --api-url http://127.0.0.1:5066 --target cpu --workers 8
+          set --api-url http://127.0.0.1:5066 --target both --workers 8
           set --clickhouse-url http://127.0.0.1:8123 --clickhouse-db fxbacktest --persist-results true
           set-param <key> --input 12 --min 6 --step 2 --max 40
           load-demo
           load-fxexport [--api-url URL] [--broker ID] [--symbol EURUSD] [--symbols EURUSD,USDJPY] [--mt5-symbol EURUSD] [--digits 5] [--from UTC] [--to UTC] [--max-rows N]
-          run [cpu|metal] [--workers N] [--chunk N] [--initial-deposit N] [--contract-size N] [--lot N]
+          run [cpu|gpu|metal|both] [--workers N] [--chunk N] [--initial-deposit N] [--contract-size N] [--lot N]
           save-results [--run-id ID] [--note TEXT]
           clean-backtest-data --older-than-days 30
           clean-backtest-data --all true
@@ -755,7 +755,7 @@ extension AppModel {
             requestedTarget = nil
         }
         if parsed.positionals.count > 1 {
-            throw TerminalCommandError.invalidValue("run accepts at most one positional target: cpu or metal.")
+            throw TerminalCommandError.invalidValue("run accepts at most one positional target: cpu, gpu/metal, or both.")
         }
         try validateConfigurationOptions(parsed.options, allowedGroup: .run)
         await stopActiveWorkAndWait(reason: "start optimization")
@@ -1101,10 +1101,16 @@ extension AppModel {
     }
 
     private func parseTarget(_ value: String) throws -> BacktestExecutionTarget {
-        guard let target = BacktestExecutionTarget(rawValue: value.lowercased()) else {
-            throw TerminalCommandError.invalidValue("target must be cpu or metal.")
+        switch value.lowercased() {
+        case "cpu":
+            return .cpu
+        case "gpu", "metal", "gpu-metal", "gpu_metal":
+            return .metal
+        case "both", "hybrid", "cpu-gpu", "cpu_gpu", "cpu-metal", "cpu_metal":
+            return .both
+        default:
+            throw TerminalCommandError.invalidValue("target must be cpu, gpu/metal, or both.")
         }
-        return target
     }
 
     private func parseInt(_ value: String, name: String, minimum: Int? = nil, range: ClosedRange<Int>? = nil) throws -> Int {
@@ -1209,7 +1215,7 @@ extension AppModel {
 
     private func pluginSummary() -> String {
         let lines = plugins.map { plugin in
-            let metal = plugin.descriptor.supportsMetal ? "metal" : "cpu-only"
+            let metal = plugin.descriptor.supportsMetal ? "cpu/metal/both" : "cpu-only"
             let acceleration = plugin.accelerationDescriptor.supportedBackends.map(\.rawValue).joined(separator: ",")
             return "  \(plugin.id) - \(plugin.descriptor.displayName) \(plugin.descriptor.version) [\(metal); accel \(acceleration)]"
         }

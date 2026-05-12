@@ -157,8 +157,8 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 10) {
                 Picker("Engine", selection: $model.executionTarget) {
                     ForEach(BacktestExecutionTarget.allCases) { target in
-                        Text(target.rawValue.uppercased()).tag(target)
-                            .disabled(target == .metal && model.selectedPlugin.metalKernel == nil)
+                        Text(target.displayName).tag(target)
+                            .disabled(target.requiresMetalKernel && model.selectedPlugin.metalKernel == nil)
                     }
                 }
                 .pickerStyle(.segmented)

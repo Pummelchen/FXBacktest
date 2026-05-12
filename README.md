@@ -11,7 +11,8 @@ The goal is similar to the MT5 Strategy Tester optimization view: define a matri
 - Broker/execution model v2 with per-symbol digits, lot constraints, spread, slippage, commission, swap, margin, position lifecycle, and trade ledger types.
 - Multi-symbol market universe support for plugins that need more than one loaded Forex pair.
 - CPU optimizer that splits work by complete backtest pass across workers.
-- Optional Metal execution for plugins that provide a matching Metal compute kernel.
+- Optional GPU execution through Metal for plugins that provide a matching compute kernel.
+- Hybrid CPU+GPU execution that shares the pass matrix across CPU workers and Metal for maximum throughput.
 - Plugin acceleration descriptor/IR scaffold for future generated Swift SIMD and Metal kernels.
 - Read-only FXExport data loading through the dedicated FXBacktest API v1.
 - Pre-run MT5 execution snapshot through FXExport API v1 for bid/ask, spread, swap, margin, lot limits, and account leverage.
@@ -38,6 +39,7 @@ Important files:
 - `Sources/FXBacktestCore/PluginAPI.swift`: Plugin API v1.
 - `Sources/FXBacktestCore/CPUBacktestExecutor.swift`: whole-pass CPU optimization.
 - `Sources/FXBacktestCore/MetalBacktestExecutor.swift`: plugin-provided Metal kernel runner.
+- `Sources/FXBacktestCore/HybridBacktestExecutor.swift`: shared CPU+Metal pass scheduling.
 - `Sources/FXBacktestCore/ExecutionModel.swift`: broker/execution v2 model and deterministic broker simulator.
 - `Sources/FXBacktestCore/OhlcMarketUniverse.swift`: aligned multi-symbol OHLC universe.
 - `Sources/FXBacktestCore/FXExportHistoryLoader.swift`: FXExport FXBacktest API v1 client bridge.
@@ -114,7 +116,7 @@ The first screen is the working backtester, not a setup wizard. It includes:
 
 - EA plugin picker.
 - Data controls.
-- CPU/Metal engine selector.
+- CPU, GPU (Metal), and Both engine selector.
 - Parameter matrix editor.
 - Run/Stop buttons.
 - Live MT5-style optimization table.
@@ -170,7 +172,7 @@ Then in FXBacktest:
 4. Set expected MT5 symbol and digits.
 5. Set UTC start/end epoch seconds, minute-aligned.
 6. Click `Load FXExport`.
-7. Select CPU or Metal.
+7. Select CPU, GPU (Metal), or Both.
 8. Edit the parameter matrix.
 9. Click `Run`.
 
@@ -182,7 +184,7 @@ The same flow from the FXBacktest terminal prompt is:
 > load-fxexport --api-url http://127.0.0.1:5066 --broker icmarkets-sc-mt5-4 --symbol EURUSD --mt5-symbol EURUSD --digits 5 --from 1704067200 --to 1707177600 --max-rows 5000000
 > set-param fast_period --input 12 --min 6 --step 2 --max 40
 > set-param slow_period --input 48 --min 24 --step 4 --max 120
-> run cpu --workers 8 --chunk 128
+> run both --workers 8 --chunk 128
 ```
 
 For multi-symbol EAs such as FXStupid, load an aligned market universe in one command. FXBacktest requests each symbol from FXExport API v1 and rejects the universe if timestamps do not line up exactly:
@@ -212,12 +214,12 @@ plugins
 plugin <plugin-id-or-display-name>
 params
 set <field> <value>
-set --api-url http://127.0.0.1:5066 --target cpu --workers 8
+set --api-url http://127.0.0.1:5066 --target both --workers 8
 set --clickhouse-url http://127.0.0.1:8123 --clickhouse-db fxbacktest --persist-results true
 set-param <key> --input 12 --min 6 --step 2 --max 40
 load-demo
 load-fxexport [--api-url URL] [--broker ID] [--symbol EURUSD] [--symbols EURUSD,USDJPY] [--mt5-symbol EURUSD] [--digits 5] [--from UTC] [--to UTC] [--max-rows N]
-run [cpu|metal] [--workers N] [--chunk N] [--initial-deposit N] [--contract-size N] [--lot N]
+run [cpu|gpu|metal|both] [--workers N] [--chunk N] [--initial-deposit N] [--contract-size N] [--lot N]
 save-results [--run-id ID] [--note TEXT]
 clean-backtest-data --older-than-days 30
 clean-backtest-data --all true
@@ -393,11 +395,13 @@ FXStupid now uses `OhlcMarketUniverse`, so loaded symbols from `FXPairs` can par
 
 `PluginAccelerationDescriptor` and `PluginAccelerationIR` define the v1 scaffold for converting suitable plugins into generated Swift SIMD or Metal kernels while keeping the hand-converted Swift plugin as the fidelity reference. The reference Moving Average Cross plugin declares a Metal entry point and IR operation. FXStupid deliberately stays scalar CPU until its EA flow is validated against MT5 results.
 
-## CPU And Metal Execution Model
+## CPU, GPU, And Hybrid Execution Model
 
 CPU optimization splits the parameter matrix into chunks. Each worker receives complete passes and each pass owns its strategy state. FXBacktest does not split one pass across multiple threads because that risks state corruption in converted EA logic.
 
-Metal optimization is available only for plugins that provide `MetalKernelV1`. Swift plugin code does not automatically run on the GPU. A Metal plugin kernel receives immutable OHLC buffers, a flattened parameter buffer, job records, and a result buffer. Each GPU thread owns one complete parameter combination and writes one result row.
+GPU optimization is available through Metal only for plugins that provide `MetalKernelV1`. Swift plugin code does not automatically run on the GPU. A Metal plugin kernel receives immutable OHLC buffers, a flattened parameter buffer, job records, and a result buffer. Each GPU thread owns one complete parameter combination and writes one result row.
+
+`Both` is the hybrid mode. It requires a Metal-capable plugin and runs CPU workers plus a Metal command-buffer loop at the same time. A shared allocator hands out disjoint pass ranges, so each parameter combination is executed exactly once by either CPU or GPU. Result rows still record the engine that produced the pass as `cpu` or `metal`; the stored run target is `both`.
 
 ## Metal Kernel ABI v1
 
@@ -431,6 +435,7 @@ The test suite includes:
 - Lazy parameter-matrix indexing.
 - CPU whole-pass chunk execution.
 - Metal kernel compile and dispatch smoke test when Metal is available.
+- Hybrid CPU+Metal scheduling without duplicate pass indexes.
 - Broker/execution v2 spread, commission, and ledger behavior.
 - Multi-symbol universe alignment validation.
 - FXStupid multi-symbol universe behavior.
@@ -452,4 +457,4 @@ Project documentation is also published in the GitHub Wiki:
 
 ## Status
 
-FXBacktest is in the first functional engine/app stage. It can load demo data, load single-symbol or aligned multi-symbol verified FXExport data, pull current MT5 execution snapshots through FXExport before each non-demo run, run CPU optimizations, run Metal optimizations for plugins that provide a kernel, and persist optimization results to ClickHouse through its own result-store API. Future work should add more converted EA plugins, fuller generated-kernel acceleration, broker-specific commission/slippage enrichment, and optional single-pass reporting.
+FXBacktest is in the first functional engine/app stage. It can load demo data, load single-symbol or aligned multi-symbol verified FXExport data, pull current MT5 execution snapshots through FXExport before each non-demo run, run CPU, Metal, or hybrid CPU+Metal optimizations for plugins that provide a kernel, and persist optimization results to ClickHouse through its own result-store API. Future work should add more converted EA plugins, fuller generated-kernel acceleration, broker-specific commission/slippage enrichment, and optional single-pass reporting.

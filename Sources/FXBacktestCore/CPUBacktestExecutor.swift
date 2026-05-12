@@ -84,7 +84,7 @@ public struct CPUBacktestExecutor: Sendable {
         }
     }
 
-    private static func computeChunk(
+    static func computeChunk(
         _ range: Range<UInt64>,
         plugin: AnyFXBacktestPlugin,
         marketUniverse: OhlcMarketUniverse,
