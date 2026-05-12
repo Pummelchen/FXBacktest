@@ -44,6 +44,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
 
     @Published private(set) var market: OhlcDataSeries?
     @Published private(set) var results: [BacktestPassResult] = []
+    @Published private(set) var resultInitialDeposit: Double = 10_000
     @Published private(set) var progress = BacktestProgress(completedPasses: 0, totalPasses: 0, elapsedSeconds: 0)
     @Published private(set) var statusText = "Ready"
     @Published private(set) var isRunning = false
@@ -93,6 +94,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         selectedPluginID = pluginID
         parameterRows = Self.rows(for: selectedPlugin)
         results = []
+        resultInitialDeposit = initialDeposit
         progress = BacktestProgress(completedPasses: 0, totalPasses: 0, elapsedSeconds: 0)
         if executionTarget == .metal, selectedPlugin.metalKernel == nil {
             executionTarget = .cpu
@@ -110,6 +112,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         do {
             market = try OhlcDataSeries.demoEURUSD()
             results = []
+            resultInitialDeposit = initialDeposit
             if let market {
                 updateStatus("Loaded demo \(market.metadata.logicalSymbol) M1 data: \(market.count) bars", log: .success)
             }
@@ -163,6 +166,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
                     } else {
                         self.market = loaded
                         self.results = []
+                        self.resultInitialDeposit = self.initialDeposit
                         self.updateStatus("Loaded \(loaded.metadata.logicalSymbol) M1 data: \(loaded.count) verified bars", log: .success)
                     }
                     self.isLoadingData = false
@@ -221,6 +225,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         let optimizer = BacktestOptimizer()
 
         results = []
+        resultInitialDeposit = settings.initialDeposit
         progress = BacktestProgress(completedPasses: 0, totalPasses: sweep.combinationCount, elapsedSeconds: 0)
         isRunning = true
         lastTerminalProgressLog = .distantPast
@@ -433,6 +438,7 @@ extension AppModel {
                 await stopActiveWorkAndWait(reason: "reset parameters")
                 parameterRows = Self.rows(for: selectedPlugin)
                 results = []
+                resultInitialDeposit = initialDeposit
                 updateStatus("Reset parameters for \(selectedPlugin.descriptor.displayName)", log: .success)
             case "exit", "quit":
                 await stopActiveWorkAndWait(reason: "exit")
@@ -541,6 +547,7 @@ extension AppModel {
         }
 
         results = []
+        resultInitialDeposit = initialDeposit
         updateStatus("Updated FXBacktest settings", log: .success)
     }
 
@@ -594,6 +601,7 @@ extension AppModel {
         await stopActiveWorkAndWait(reason: "update parameter")
         parameterRows[index] = row
         results = []
+        resultInitialDeposit = initialDeposit
         updateStatus("Updated parameter \(row.definition.key)", log: .success)
     }
 

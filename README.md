@@ -107,7 +107,7 @@ The first screen is the working backtester, not a setup wizard. It includes:
 - CPU/Metal engine selector.
 - Parameter matrix editor.
 - Run/Stop buttons.
-- Live pass-results table.
+- Live MT5-style optimization table.
 
 ### 4. Run A Demo Backtest
 
@@ -259,6 +259,8 @@ Plugin rules:
 - Register plugins in `FXBacktestPluginRegistry`.
 
 Single-pass reports are intentionally not implemented yet. The current product focus is maximum optimizer throughput and a live pass table.
+
+The live optimization table follows the MT5 tester shape: fixed metric columns first (`Pass`, `Result`, `Profit`, `Total trades`, `Drawdown %`, `Recovery factor`, `Sharpe ratio`), followed by one column per tested plugin input parameter.
 
 ### FXStupid
 

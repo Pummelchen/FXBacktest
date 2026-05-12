@@ -1,8 +1,10 @@
+import AppKit
 import FXBacktestCore
 import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var model: AppModel
+    @State private var selectedResultID: UInt64?
 
     var body: some View {
         NavigationSplitView {
@@ -251,54 +253,172 @@ struct ContentView: View {
     private var resultPanel: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text("Passes")
+                Text("Optimization Results")
                     .font(.headline)
                 Spacer()
-                Text("showing best \(model.bestResults.count.formatted())")
+                Text("\(model.bestResults.count.formatted()) passes")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
             .padding(.horizontal)
             .padding(.vertical, 10)
 
-            Table(model.bestResults) {
-                TableColumn("Pass") { result in
-                    Text("\(result.passIndex)")
-                        .monospacedDigit()
+            ScrollView([.horizontal, .vertical]) {
+                LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
+                    Section {
+                        ForEach(Array(model.bestResults.enumerated()), id: \.element.passIndex) { index, result in
+                            optimizationResultRow(result, index: index)
+                        }
+                    } header: {
+                        optimizationHeader
+                    }
                 }
-                .width(70)
-                TableColumn("Profit") { result in
-                    Text(result.netProfit.formatted(.number.precision(.fractionLength(2))))
-                        .monospacedDigit()
-                        .foregroundStyle(result.netProfit >= 0 ? .green : .red)
-                }
-                .width(100)
-                TableColumn("Drawdown") { result in
-                    Text(result.maxDrawdown.formatted(.number.precision(.fractionLength(2))))
-                        .monospacedDigit()
-                }
-                .width(100)
-                TableColumn("Trades") { result in
-                    Text("\(result.totalTrades)")
-                        .monospacedDigit()
-                }
-                .width(70)
-                TableColumn("Win %") { result in
-                    Text((result.winRate * 100).formatted(.number.precision(.fractionLength(1))))
-                        .monospacedDigit()
-                }
-                .width(70)
-                TableColumn("PF") { result in
-                    Text(result.profitFactor.isFinite ? result.profitFactor.formatted(.number.precision(.fractionLength(2))) : "inf")
-                        .monospacedDigit()
-                }
-                .width(70)
-                TableColumn("Params") { result in
-                    Text(result.parameters.map { "\($0.key)=\($0.value.formatted(.number.precision(.fractionLength(2))))" }.joined(separator: ", "))
-                        .lineLimit(1)
-                        .font(.caption)
-                }
+                .frame(minWidth: optimizationTableWidth, alignment: .topLeading)
+            }
+            .background(Color(nsColor: .textBackgroundColor))
+            .overlay(alignment: .top) {
+                Rectangle()
+                    .fill(Color(nsColor: .separatorColor))
+                    .frame(height: 1)
             }
         }
+    }
+
+    private var optimizationHeader: some View {
+        HStack(spacing: 0) {
+            metricHeader("Pass", width: 88, alignment: .leading)
+            metricHeader("Result  ✓", width: 118)
+            metricHeader("Profit", width: 110)
+            metricHeader("Total trades", width: 118)
+            metricHeader("Drawdown %", width: 118)
+            metricHeader("Recovery factor", width: 132)
+            metricHeader("Sharpe ratio", width: 132)
+            ForEach(model.selectedPlugin.parameterDefinitions) { parameter in
+                metricHeader(parameter.displayName, width: parameterColumnWidth)
+            }
+        }
+        .frame(height: 24)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Color(nsColor: .separatorColor))
+                .frame(height: 1)
+        }
+    }
+
+    private func optimizationResultRow(_ result: BacktestPassResult, index: Int) -> some View {
+        let isSelected = selectedResultID == result.passIndex
+
+        return HStack(spacing: 0) {
+            metricCell("\(result.passIndex)", width: 88, alignment: .leading, isSelected: isSelected)
+            metricCell(formatDecimal(resultValue(result)), width: 118, isSelected: isSelected)
+            metricCell(formatDecimal(result.netProfit), width: 110, isSelected: isSelected)
+            metricCell("\(result.totalTrades)", width: 118, isSelected: isSelected)
+            metricCell(formatDecimal(drawdownPercent(result)), width: 118, isSelected: isSelected)
+            metricCell(formatDecimal(recoveryFactor(result)), width: 132, isSelected: isSelected)
+            metricCell(formatDecimal(sharpeRatio(result)), width: 132, isSelected: isSelected)
+            ForEach(model.selectedPlugin.parameterDefinitions) { parameter in
+                metricCell(
+                    parameterValue(result, definition: parameter),
+                    width: parameterColumnWidth,
+                    isSelected: isSelected
+                )
+            }
+        }
+        .frame(height: 20)
+        .background(rowBackground(index: index, isSelected: isSelected))
+        .contentShape(Rectangle())
+        .onTapGesture {
+            selectedResultID = result.passIndex
+        }
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Color(nsColor: .separatorColor).opacity(0.45))
+                .frame(height: 1)
+        }
+    }
+
+    private var optimizationTableWidth: CGFloat {
+        816 + (CGFloat(model.selectedPlugin.parameterDefinitions.count) * parameterColumnWidth)
+    }
+
+    private var parameterColumnWidth: CGFloat {
+        132
+    }
+
+    private func metricHeader(_ title: String, width: CGFloat, alignment: Alignment = .trailing) -> some View {
+        Text(title)
+            .font(.system(size: 11))
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .foregroundStyle(.primary)
+            .frame(width: width, alignment: alignment)
+            .padding(.horizontal, 6)
+            .overlay(alignment: .trailing) {
+                Rectangle()
+                    .fill(Color(nsColor: .separatorColor))
+                    .frame(width: 1)
+            }
+    }
+
+    private func metricCell(_ value: String, width: CGFloat, alignment: Alignment = .trailing, isSelected: Bool) -> some View {
+        Text(value)
+            .font(.system(size: 11, design: .monospaced))
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .foregroundStyle(.primary)
+            .frame(width: width, alignment: alignment)
+            .padding(.horizontal, 6)
+            .overlay(alignment: .trailing) {
+                Rectangle()
+                    .fill(Color(nsColor: .separatorColor).opacity(0.7))
+                    .frame(width: 1)
+            }
+    }
+
+    private func rowBackground(index: Int, isSelected: Bool) -> Color {
+        if isSelected {
+            return Color(nsColor: .selectedContentBackgroundColor).opacity(0.28)
+        }
+        return index.isMultiple(of: 2)
+            ? Color(nsColor: .textBackgroundColor)
+            : Color(nsColor: .controlBackgroundColor).opacity(0.58)
+    }
+
+    private func resultValue(_ result: BacktestPassResult) -> Double {
+        model.resultInitialDeposit + result.netProfit
+    }
+
+    private func drawdownPercent(_ result: BacktestPassResult) -> Double {
+        guard model.resultInitialDeposit > 0 else { return 0 }
+        return (result.maxDrawdown / model.resultInitialDeposit) * 100
+    }
+
+    private func recoveryFactor(_ result: BacktestPassResult) -> Double {
+        guard result.maxDrawdown > 0 else { return 0 }
+        return result.netProfit / result.maxDrawdown
+    }
+
+    private func sharpeRatio(_: BacktestPassResult) -> Double {
+        0
+    }
+
+    private func parameterValue(_ result: BacktestPassResult, definition: ParameterDefinition) -> String {
+        guard let value = result.parameters.first(where: { $0.key == definition.key })?.value else {
+            return ""
+        }
+        switch definition.valueKind {
+        case .integer:
+            return value.formatted(.number.precision(.fractionLength(0)))
+        case .boolean:
+            return value == 0 ? "0" : "1"
+        case .decimal:
+            return value.formatted(.number.precision(.fractionLength(0...4)))
+        }
+    }
+
+    private func formatDecimal(_ value: Double) -> String {
+        guard value.isFinite else { return "inf" }
+        return value.formatted(.number.precision(.fractionLength(2)))
     }
 }
