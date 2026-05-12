@@ -1,33 +1,167 @@
 # FXBacktest
 
-FXBacktest is a Swift macOS backtesting shell for running converted MQL5 Expert Advisors as Swift plugins against verified M1 OHLC data produced by FXExport.
+FXBacktest is a native Swift macOS backtesting application for running converted MQL5 Expert Advisors as high-performance Swift plugins. It is designed to work with [FXExport](https://github.com/Pummelchen/FXExport) as the historical Forex data provider: FXExport ingests and verifies M1 OHLC data from MetaTrader 5, and FXBacktest consumes that verified data for optimization runs.
 
-The current implementation provides:
+The goal is similar to the MT5 Strategy Tester optimization view: define a matrix of input/min/step/max parameters, run many complete backtest passes on CPU or Metal, and watch the live table of pass results.
 
-- Plugin API v1 for single-file Swift EA plugins.
-- CPU optimization that splits work by complete backtest pass, not by sharing one pass across threads.
-- Optional Metal execution for plugins that embed a matching Metal compute kernel.
-- FXExport history loading through the verified canonical M1 OHLC API.
-- A live SwiftUI passes table with profit, drawdown, trades, win rate, profit factor, and parameter values.
+## Current Capabilities
 
-## Architecture
+- Native SwiftPM macOS app with SwiftUI interface.
+- Plugin API v1 for converted MQL5 EAs stored as optimized single-file Swift plugins.
+- CPU optimizer that splits work by complete backtest pass across workers.
+- Optional Metal execution for plugins that provide a matching Metal compute kernel.
+- Read-only FXExport data loading through verified canonical M1 OHLC in ClickHouse.
+- Live pass table with profit, drawdown, trades, win rate, profit factor, and parameters.
+- Demo data mode for UI and engine testing when FXExport/ClickHouse is not running.
 
-`FXBacktestCore` owns the stable API:
+## Repository Layout
 
-- `OhlcDataSeries`: immutable, columnar UTC/open/high/low/close arrays.
-- `ParameterDefinition`, `ParameterSweepDimension`, `ParameterSweep`: lazy parameter-matrix enumeration.
-- `FXBacktestPluginV1`: the plugin contract for converted EAs.
-- `CPUBacktestExecutor`: chunked whole-pass parallel optimizer.
-- `MetalBacktestExecutor`: plugin-provided Metal kernel runner.
-- `FXExportHistoryLoader`: ClickHouse/FXExport data bridge.
+```text
+Package.swift
+Sources/
+  FXBacktest/                 SwiftUI macOS app
+  FXBacktestCore/             engine, data model, FXExport loader, plugin API
+  FXBacktestPlugins/          converted EA plugins
+Tests/
+  FXBacktestCoreTests/        engine, sweep, and Metal smoke tests
+```
 
-`FXBacktestPlugins` stores EA plugins. Converted MQL5 EAs should be added here as single Swift files and registered in `FXBacktestPluginRegistry`.
+Important files:
 
-`FXBacktest` is the SwiftUI app.
+- `Sources/FXBacktestCore/PluginAPI.swift`: Plugin API v1.
+- `Sources/FXBacktestCore/CPUBacktestExecutor.swift`: whole-pass CPU optimization.
+- `Sources/FXBacktestCore/MetalBacktestExecutor.swift`: plugin-provided Metal kernel runner.
+- `Sources/FXBacktestCore/FXExportHistoryLoader.swift`: FXExport/ClickHouse data bridge.
+- `Sources/FXBacktestPlugins/MovingAverageCrossPlugin.swift`: reference EA plugin.
+
+## Requirements
+
+- macOS 13 or newer.
+- Apple Silicon Mac recommended, especially M2/M3 for the intended performance target.
+- Swift 6 toolchain.
+- FXExport repo checked out next to this repo:
+
+```text
+FX/
+  FXBacktest/
+  FXExport/
+    MT5Research/
+```
+
+The Swift package dependency is local:
+
+```swift
+.package(path: "../FXExport/MT5Research")
+```
+
+## Quickstart
+
+### 1. Clone FXBacktest
+
+```bash
+git clone https://github.com/Pummelchen/FXBacktest.git
+cd FXBacktest
+```
+
+Make sure FXExport exists next to it:
+
+```bash
+cd ..
+git clone https://github.com/Pummelchen/FXExport.git
+cd FXBacktest
+```
+
+### 2. Build And Test
+
+```bash
+swift test
+swift build -c release
+```
+
+Release builds are the relevant performance baseline because SwiftPM uses whole-module optimization in release mode.
+
+### 3. Run The App
+
+```bash
+swift run FXBacktest
+```
+
+The first screen is the working backtester, not a setup wizard. It includes:
+
+- EA plugin picker.
+- Data controls.
+- CPU/Metal engine selector.
+- Parameter matrix editor.
+- Run/Stop buttons.
+- Live pass-results table.
+
+### 4. Run A Demo Backtest
+
+Use this when FXExport or ClickHouse is not running.
+
+1. Launch FXBacktest.
+2. Select `Moving Average Cross`.
+3. Click `Demo`.
+4. Keep `CPU` selected.
+5. Adjust parameter ranges if needed.
+6. Click `Run`.
+
+The pass table updates live and sorts the best results by net profit.
+
+### 5. Run A Backtest With FXExport Data
+
+FXExport is responsible for historical data ingestion, broker UTC mapping, verification, repair, and ClickHouse storage. FXBacktest only reads verified data.
+
+In FXExport, prepare the data first:
+
+```bash
+cd ../FXExport/MT5Research
+swift build -c release
+.build/release/FXExport startcheck --config-dir Config --migrations-dir Migrations
+.build/release/FXExport backfill --config-dir Config --symbols all
+.build/release/FXExport verify --config-dir Config --random-ranges 20
+```
+
+Then in FXBacktest:
+
+1. Set ClickHouse URL, usually `http://127.0.0.1:8123`.
+2. Set database, usually `fxexport`.
+3. Set broker source id, for example `icmarkets-sc-mt5-4`.
+4. Set logical symbol, for example `EURUSD`.
+5. Set expected MT5 symbol and digits.
+6. Set UTC start/end epoch seconds, minute-aligned.
+7. Click `Load FXExport`.
+8. Select CPU or Metal.
+9. Edit the parameter matrix.
+10. Click `Run`.
+
+If FXExport reports missing verified coverage, bad hashes, mixed digits, duplicate timestamps, invalid OHLC rows, or unsafe ingestion state, FXBacktest fails closed instead of running against questionable data.
+
+## FXExport Data Contract
+
+FXBacktest consumes FXExport through the `FXExportHistoryData` SwiftPM product. The data path is:
+
+```text
+MT5 + FXExport EA
+  -> FXExport Swift ingestion
+  -> ClickHouse canonical M1 OHLC
+  -> FXExport verified history-data API
+  -> FXBacktest OhlcDataSeries
+  -> CPU or Metal optimization
+```
+
+FXBacktest expects:
+
+- M1 closed bars only.
+- UTC timestamps, not MT5 server timestamps.
+- Scaled integer OHLC prices.
+- Strictly increasing timestamps.
+- Complete verified coverage for the requested UTC range.
+- Matching broker source, logical symbol, MT5 symbol, and digits.
 
 ## Plugin API v1
 
-A plugin implements `FXBacktestPluginV1`:
+Converted EAs implement `FXBacktestPluginV1`:
 
 ```swift
 public protocol FXBacktestPluginV1: Sendable {
@@ -43,19 +177,26 @@ public protocol FXBacktestPluginV1: Sendable {
 }
 ```
 
-Rules for converted EA plugins:
+Plugin rules:
 
 - Keep all mutable EA state local to `runPass`.
 - Do not share mutable globals across passes.
-- Read market arrays only; FXBacktest treats OHLC data as immutable.
-- Return aggregate pass metrics only. Single-pass reports are intentionally out of scope for now.
-- If GPU execution is required, embed a `MetalKernelV1` source string with the documented buffer layout used by `MetalBacktestExecutor`.
+- Treat OHLC arrays as read-only.
+- Return aggregate metrics for each pass.
+- Store converted EA plugins in `Sources/FXBacktestPlugins/`.
+- Register plugins in `FXBacktestPluginRegistry`.
 
-This maps MQL5 EA lifecycle into a deterministic pass: initialize local state, loop over M1 bars, apply signal/trade logic, finalize metrics.
+Single-pass reports are intentionally not implemented yet. The current product focus is maximum optimizer throughput and a live pass table.
 
-### Metal Kernel ABI v1
+## CPU And Metal Execution Model
 
-Metal plugins embed an MSL source string and entry point. FXBacktest binds buffers as:
+CPU optimization splits the parameter matrix into chunks. Each worker receives complete passes and each pass owns its strategy state. FXBacktest does not split one pass across multiple threads because that risks state corruption in converted EA logic.
+
+Metal optimization is available only for plugins that provide `MetalKernelV1`. Swift plugin code does not automatically run on the GPU. A Metal plugin kernel receives immutable OHLC buffers, a flattened parameter buffer, job records, and a result buffer. Each GPU thread owns one complete parameter combination and writes one result row.
+
+## Metal Kernel ABI v1
+
+FXBacktest binds Metal buffers as:
 
 | Index | Type | Meaning |
 | --- | --- | --- |
@@ -70,32 +211,35 @@ Metal plugins embed an MSL source string and entry point. FXBacktest binds buffe
 | 8 | `device FXBTMetalResult *` | Output rows, one per job |
 | 9 | `constant FXBTMetalRunConfig &` | Initial deposit, contract-lot value, price scale, digits |
 
-The kernel must assign exactly one independent pass to each `thread_position_in_grid` and write only `results[id]`. Do not write shared global state from a plugin kernel.
+The kernel must assign exactly one independent pass to each `thread_position_in_grid` and write only `results[id]`.
 
-## Performance Model
-
-FXBacktest follows the same safety constraint as MT5-style optimization: a whole backtest pass owns its state. CPU workers receive ranges of complete parameter combinations, and each pass loops over the full market series independently. This avoids cross-thread state sharing and data corruption.
-
-Metal mode is only used when a plugin supplies a GPU kernel. Swift plugin code itself cannot execute on the GPU. The Metal path compiles the plugin kernel once per run, uploads immutable OHLC buffers, dispatches one GPU thread per parameter combination, and writes one result row per job.
-
-## FXExport Data
-
-FXBacktest expects FXExport to own ingestion, repair, UTC mapping, and verification. The app requests verified canonical M1 data from ClickHouse through FXExport's Swift API. Data loading fails closed if FXExport reports missing verified coverage, bad hashes, mixed digits, duplicate timestamps, or invalid OHLC rows.
-
-Default ClickHouse settings in the UI:
-
-- URL: `http://127.0.0.1:8123`
-- Database: `fxexport`
-- Symbol: `EURUSD`
-
-Use the Demo button when ClickHouse/FXExport is not running.
-
-## Build And Test
+## Testing
 
 ```bash
 swift test
+swift test -c release
 swift build -c release
-swift run FXBacktest
 ```
 
-Release builds are the relevant performance baseline because SwiftPM enables whole-module optimization in release mode.
+The test suite includes:
+
+- Lazy parameter-matrix indexing.
+- CPU whole-pass chunk execution.
+- Metal kernel compile and dispatch smoke test when Metal is available.
+
+## GitHub Wiki
+
+Project documentation is also published in the GitHub Wiki:
+
+- Home
+- Quickstart Guide
+- FXExport Data Provider
+- Architecture
+- Plugin API v1
+- CPU and Metal Optimization
+- Troubleshooting
+- Developer Workflow
+
+## Status
+
+FXBacktest is in the first functional engine/app stage. It can load demo data, load verified FXExport data, run CPU optimizations, and run Metal optimizations for plugins that provide a kernel. Future work should add more converted EA plugins, richer broker/execution modeling, durable optimization jobs, and optional single-pass reporting.
