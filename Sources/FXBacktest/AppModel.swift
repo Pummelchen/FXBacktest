@@ -20,43 +20,6 @@ private enum StatusLogMode {
     case progress(BacktestProgress)
 }
 
-private actor BacktestResultPersistenceBuffer {
-    private let store: ClickHouseBacktestResultStore
-    private let runID: String
-    private let batchSize: Int
-    private var buffer: [BacktestPassResult] = []
-
-    private init(store: ClickHouseBacktestResultStore, runID: String, batchSize: Int) {
-        self.store = store
-        self.runID = runID
-        self.batchSize = max(1, batchSize)
-    }
-
-    static func start(store: ClickHouseBacktestResultStore, run: BacktestStoredRun, batchSize: Int = 500) async throws -> BacktestResultPersistenceBuffer {
-        try await store.startRun(run)
-        return BacktestResultPersistenceBuffer(store: store, runID: run.runID, batchSize: batchSize)
-    }
-
-    func append(_ result: BacktestPassResult) async throws {
-        buffer.append(result)
-        if buffer.count >= batchSize {
-            try await flush()
-        }
-    }
-
-    func finish(progress: BacktestProgress, status: String) async throws {
-        try await flush()
-        try await store.completeRun(runID: runID, progress: progress, status: status)
-    }
-
-    private func flush() async throws {
-        guard !buffer.isEmpty else { return }
-        let batch = buffer
-        try await store.appendResults(batch, runID: runID)
-        buffer.removeFirst(batch.count)
-    }
-}
-
 @MainActor
 final class AppModel: ObservableObject, @unchecked Sendable {
     let plugins = FXBacktestPluginRegistry.availablePlugins
@@ -93,6 +56,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     @Published private(set) var statusText = "Ready"
     @Published private(set) var isRunning = false
     @Published private(set) var isLoadingData = false
+    @Published private(set) var agentOutcomes: [FXBacktestAgentKind: FXBacktestAgentOutcome] = [:]
 
     private var runTask: Task<Void, Never>?
     private var dataLoadTask: Task<Void, Never>?
@@ -165,6 +129,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
             lastRunSettings = nil
             resultInitialDeposit = initialDeposit
             if let market {
+                recordAgentOutcome(MarketReadinessAgent().evaluate(universe: market.universe))
                 updateStatus("Loaded demo \(market.metadata.logicalSymbol) M1 data: \(market.count) bars", log: .success)
             }
         } catch {
@@ -213,11 +178,25 @@ final class AppModel: ObservableObject, @unchecked Sendable {
 
         dataLoadTask = Task.detached { [connection, requests, primarySymbol] in
             do {
+                let connectivity = try await FXExportConnectivityAgent().check(connection: connection)
+                await MainActor.run {
+                    self.recordAgentOutcome(connectivity)
+                }
+                guard !connectivity.isBlockingFailure else {
+                    throw FXBacktestError.dataLoadFailed(connectivity.message)
+                }
                 let loadedUniverse = try await FXExportHistoryLoader().loadUniverse(
                     connection: connection,
                     requests: requests,
                     primarySymbol: primarySymbol
                 )
+                let marketReadiness = MarketReadinessAgent().evaluate(universe: loadedUniverse)
+                await MainActor.run {
+                    self.recordAgentOutcome(marketReadiness)
+                }
+                guard !marketReadiness.isBlockingFailure else {
+                    throw FXBacktestError.invalidMarketData(marketReadiness.message)
+                }
                 let loaded = loadedUniverse.primary
                 let wasCancelled = Task.isCancelled
                 await MainActor.run {
@@ -263,11 +242,31 @@ final class AppModel: ObservableObject, @unchecked Sendable {
             return
         }
 
+        let plugin = selectedPlugin
         let sweep: ParameterSweep
         do {
             try validateCurrentRunSettings()
-            if executionTarget.requiresMetalKernel, selectedPlugin.metalKernel == nil {
-                throw FXBacktestError.metalKernelMissing(plugin: selectedPlugin.descriptor.displayName)
+            let pluginOutcome = PluginValidationAgent().validate(plugin: plugin)
+            recordAgentOutcome(pluginOutcome)
+            guard !pluginOutcome.isBlockingFailure else {
+                throw FXBacktestError.invalidParameter(pluginOutcome.message)
+            }
+            let marketOutcome = MarketReadinessAgent().evaluate(universe: marketUniverse)
+            recordAgentOutcome(marketOutcome)
+            guard !marketOutcome.isBlockingFailure else {
+                throw FXBacktestError.invalidMarketData(marketOutcome.message)
+            }
+            let resourceOutcome = ResourceHealthAgent().evaluate(
+                target: executionTarget,
+                maxWorkers: maxWorkers,
+                chunkSize: chunkSize
+            )
+            recordAgentOutcome(resourceOutcome)
+            guard !resourceOutcome.isBlockingFailure else {
+                throw FXBacktestError.invalidParameter(resourceOutcome.message)
+            }
+            if executionTarget.requiresMetalKernel, plugin.metalKernel == nil {
+                throw FXBacktestError.metalKernelMissing(plugin: plugin.descriptor.displayName)
             }
             sweep = try makeSweep()
         } catch {
@@ -275,7 +274,6 @@ final class AppModel: ObservableObject, @unchecked Sendable {
             return
         }
 
-        let plugin = selectedPlugin
         let optimizer = BacktestOptimizer()
         let target = executionTarget
         let workers = maxWorkers
@@ -283,6 +281,11 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         let deposit = initialDeposit
         let configuredContractSize = contractSize
         let configuredLotSize = lotSize
+        let configuredBrokerSourceId = brokerSourceId
+        let executionConnection = FXExportConnectionSettings(
+            apiBaseURL: URL(string: apiURLText) ?? FXExportConnectionSettings().apiBaseURL,
+            requestTimeoutSeconds: 60
+        )
 
         results = []
         lastRunSettings = nil
@@ -295,18 +298,55 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         runTask = Task {
             var finalProgress: BacktestProgress?
             var completionStatus = "completed"
-            var persistence: BacktestResultPersistenceBuffer?
+            var persistence: ResultPersistenceAgent?
             do {
-                let executionProfile = try await loadExecutionProfileForRun(marketUniverse)
-                let settings = BacktestRunSettings(
-                    target: target,
-                    maxWorkers: workers,
-                    chunkSize: chunk,
-                    initialDeposit: deposit,
-                    contractSize: configuredContractSize,
-                    lotSize: configuredLotSize,
-                    executionProfile: executionProfile
-                )
+                let executionProfile: FXBacktestExecutionProfile
+                do {
+                    let snapshot = try await ExecutionSnapshotAgent().load(
+                        connection: executionConnection,
+                        universe: marketUniverse,
+                        demoProfileBuilder: { universe in
+                            try Self.makeFallbackExecutionProfile(
+                                for: universe,
+                                brokerSourceId: configuredBrokerSourceId,
+                                contractSize: configuredContractSize
+                            )
+                        }
+                    )
+                    executionProfile = snapshot.profile
+                    recordAgentOutcome(snapshot.outcome)
+                } catch {
+                    recordAgentOutcome(FXBacktestAgentOutcome(
+                        descriptor: ExecutionSnapshotAgent.descriptor,
+                        status: .failed,
+                        message: String(describing: error)
+                    ))
+                    throw error
+                }
+                let settings: BacktestRunSettings
+                do {
+                    let prepared = try OptimizationRunCoordinatorAgent().prepare(
+                        plugin: plugin,
+                        marketUniverse: marketUniverse,
+                        sweep: sweep,
+                        target: target,
+                        maxWorkers: workers,
+                        chunkSize: chunk,
+                        initialDeposit: deposit,
+                        contractSize: configuredContractSize,
+                        lotSize: configuredLotSize,
+                        executionProfile: executionProfile
+                    )
+                    settings = prepared.settings
+                    recordAgentOutcome(prepared.outcome)
+                } catch {
+                    recordAgentOutcome(FXBacktestAgentOutcome(
+                        descriptor: OptimizationRunCoordinatorAgent.descriptor,
+                        status: .failed,
+                        message: String(describing: error)
+                    ))
+                    throw error
+                }
                 lastRunSettings = settings
                 updateStatus("Running \(plugin.descriptor.displayName) on \(settings.target.rawValue.uppercased()) with current MT5 execution terms...")
                 persistence = await startPersistenceIfEnabled(
@@ -339,12 +379,32 @@ final class AppModel: ObservableObject, @unchecked Sendable {
             }
             let progressToPersist = finalProgress ?? self.progress
             do {
-                try await persistence?.finish(progress: progressToPersist, status: completionStatus)
+                if let outcome = try await persistence?.finish(progress: progressToPersist, status: completionStatus) {
+                    recordAgentOutcome(outcome)
+                }
             } catch {
+                recordAgentOutcome(FXBacktestAgentOutcome(
+                    descriptor: ResultPersistenceAgent.descriptor,
+                    status: .failed,
+                    message: "ClickHouse completion update failed: \(error)"
+                ))
                 updateStatus("ClickHouse completion update failed: \(error)", log: .error)
             }
             isRunning = false
             runTask = nil
+        }
+    }
+
+    private func recordAgentOutcome(_ outcome: FXBacktestAgentOutcome) {
+        agentOutcomes[outcome.kind] = outcome
+        let line = "[agent] \(outcome.displayName): \(outcome.message)"
+        switch outcome.status {
+        case .ok:
+            Task { await TerminalLog.info(line) }
+        case .warning:
+            Task { await TerminalLog.warn(line) }
+        case .failed:
+            Task { await TerminalLog.error(line) }
         }
     }
 
@@ -493,47 +553,15 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         return result
     }
 
-    private func loadExecutionProfileForRun(_ universe: OhlcMarketUniverse) async throws -> FXBacktestExecutionProfile {
-        if universe.seriesBySymbol.values.allSatisfy({ $0.metadata.brokerSourceId == "demo" }) {
-            updateStatus("Demo data has no live MT5 execution snapshot; using deterministic demo execution terms.", log: .warning)
-            return try makeFallbackExecutionProfile(for: universe)
-        }
-        guard universe.seriesBySymbol.values.allSatisfy({ $0.metadata.brokerSourceId != "demo" }) else {
-            throw FXBacktestError.invalidMarketData("Cannot mix demo and FXExport market data in one backtest run.")
-        }
-        let brokerSourceIds = Set(universe.seriesBySymbol.values.map(\.metadata.brokerSourceId))
-        guard brokerSourceIds.count == 1, let runBrokerSourceId = brokerSourceIds.first else {
-            throw FXBacktestError.invalidMarketData("All symbols in one backtest run must come from the same FXExport broker source.")
-        }
-        guard let url = URL(string: apiURLText) else {
-            throw FXBacktestError.invalidParameter("Invalid FXExport API URL.")
-        }
-        let symbols = try universe.symbols.map { symbol in
-            guard let series = universe[symbol] else {
-                throw FXBacktestError.invalidMarketData("Missing loaded market data for \(symbol).")
-            }
-            let mt5Symbol = series.metadata.mt5Symbol?.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard let mt5Symbol, !mt5Symbol.isEmpty else {
-                throw FXBacktestError.invalidMarketData("\(symbol) is missing its FXExport MT5 symbol metadata.")
-            }
-            return FXExportExecutionSymbolRequest(
-                logicalSymbol: symbol,
-                expectedMT5Symbol: mt5Symbol,
-                expectedDigits: series.metadata.digits
-            )
-        }
-        let profile = try await FXExportExecutionLoader().load(
-            connection: FXExportConnectionSettings(apiBaseURL: url, requestTimeoutSeconds: 60),
-            request: FXExportExecutionRequest(
-                brokerSourceId: runBrokerSourceId,
-                symbols: symbols
-            )
-        )
-        updateStatus("Loaded MT5 execution terms for \(profile.symbols.count) symbols; account mode hedging", log: .success)
-        return profile
+    private func makeFallbackExecutionProfile(for universe: OhlcMarketUniverse) throws -> FXBacktestExecutionProfile {
+        try Self.makeFallbackExecutionProfile(for: universe, brokerSourceId: brokerSourceId, contractSize: contractSize)
     }
 
-    private func makeFallbackExecutionProfile(for universe: OhlcMarketUniverse) throws -> FXBacktestExecutionProfile {
+    nonisolated private static func makeFallbackExecutionProfile(
+        for universe: OhlcMarketUniverse,
+        brokerSourceId: String,
+        contractSize: Double
+    ) throws -> FXBacktestExecutionProfile {
         var specs: [String: FXBacktestSymbolExecutionSpec] = [:]
         for symbol in universe.symbols {
             guard let series = universe[symbol] else { continue }
@@ -584,7 +612,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         marketUniverse: OhlcMarketUniverse,
         sweep: ParameterSweep,
         settings: BacktestRunSettings
-    ) async -> BacktestResultPersistenceBuffer? {
+    ) async -> ResultPersistenceAgent? {
         guard persistResultsToClickHouse else { return nil }
         do {
             let config = try makeClickHouseConfiguration()
@@ -599,10 +627,15 @@ final class AppModel: ObservableObject, @unchecked Sendable {
                 sweep: sweep,
                 note: "FXBacktest interactive run"
             )
-            let buffer = try await BacktestResultPersistenceBuffer.start(store: store, run: run)
-            updateStatus("ClickHouse result persistence started for run \(run.runID)", log: .success)
-            return buffer
+            let agent = try await ResultPersistenceAgent.start(store: store, run: run)
+            recordAgentOutcome(await agent.latestOutcome())
+            return agent
         } catch {
+            recordAgentOutcome(FXBacktestAgentOutcome(
+                descriptor: ResultPersistenceAgent.descriptor,
+                status: .failed,
+                message: "ClickHouse persistence disabled for this run: \(error)"
+            ))
             updateStatus("ClickHouse persistence disabled for this run: \(error)", log: .error)
             return nil
         }
@@ -646,6 +679,8 @@ extension AppModel {
                 await TerminalLog.block(Self.terminalHelpText)
             case "status":
                 await TerminalLog.block(statusSummary())
+            case "agents":
+                await TerminalLog.block(agentSummary())
             case "config", "settings":
                 await TerminalLog.block(configurationSummary())
             case "plugins":
@@ -695,6 +730,7 @@ extension AppModel {
         """
         FXBacktest commands:
           status
+          agents
           config
           plugins
           plugin <plugin-id-or-display-name>
@@ -812,10 +848,15 @@ extension AppModel {
             note: note
         )
         updateStatus("Saving \(resultsSnapshot.count.formatted()) held pass results to ClickHouse run \(runID)...")
-        try await store.startRun(run)
-        try await store.appendResults(resultsSnapshot, runID: runID)
-        try await store.completeRun(runID: runID, progress: progressSnapshot, status: isRunActiveSnapshot ? "snapshot" : "completed")
-        updateStatus("Saved \(resultsSnapshot.count.formatted()) pass results to ClickHouse run \(runID)", log: .success)
+        let outcome = try await ResultPersistenceAgent.saveSnapshot(
+            store: store,
+            run: run,
+            results: resultsSnapshot,
+            progress: progressSnapshot,
+            status: isRunActiveSnapshot ? "snapshot" : "completed"
+        )
+        recordAgentOutcome(outcome)
+        updateStatus(outcome.message, log: .success)
     }
 
     private func cleanBacktestDataFromTerminal(_ arguments: ArraySlice<String>) async throws {
@@ -829,16 +870,21 @@ extension AppModel {
         }
         let config = try makeClickHouseConfiguration()
         let store = ClickHouseBacktestResultStore(configuration: config)
-        try await store.ensureSchema()
         let report: BacktestResultPurgeReport
+        let outcome: FXBacktestAgentOutcome
         if let all = parsed.options["all"], try parseBool(all, name: "all") {
-            report = try await store.purgeAll()
+            let result = try await ResultPersistenceAgent.purgeAll(store: store)
+            report = result.report
+            outcome = result.outcome
         } else if let daysValue = parsed.options["older-than-days"] ?? parsed.options["days"] {
             let days = try parseInt(daysValue, name: "older-than-days", minimum: 1)
-            report = try await store.purge(olderThanDays: days)
+            let result = try await ResultPersistenceAgent.purge(store: store, olderThanDays: days)
+            report = result.report
+            outcome = result.outcome
         } else {
             throw TerminalCommandError.invalidValue("Use clean-backtest-data --older-than-days N or clean-backtest-data --all true.")
         }
+        recordAgentOutcome(outcome)
         updateStatus("Cleaned ClickHouse backtest result data scope \(report.scope)", log: .success)
     }
 
@@ -1191,6 +1237,7 @@ extension AppModel {
           Market: \(marketText)
           Engine: \(executionTarget.rawValue), workers \(maxWorkers), chunk \(chunkSize)
           ClickHouse persistence: \(persistResultsToClickHouse ? "enabled" : "disabled")
+          Agents: \(agentStateSummaryLine())
           Sweep combinations: \(sweepText)
           Progress: \(progress.completedPasses.formatted()) / \(progress.totalPasses.formatted())
           Results held: \(results.count.formatted())
@@ -1215,6 +1262,45 @@ extension AppModel {
           Lot size: \(lotSize)
           ClickHouse results: \(clickHouseURLText), database \(clickHouseDatabase), user \(clickHouseUsername.isEmpty ? "(none)" : clickHouseUsername), password \(clickHousePassword.isEmpty ? "(not set)" : "(set)"), auto-persist \(persistResultsToClickHouse)
         """
+    }
+
+    private func agentSummary() -> String {
+        let lines = FXBacktestAgentKind.allCases.map { kind -> String in
+            if let outcome = agentOutcomes[kind] {
+                let detail = outcome.details.isEmpty ? "" : " (\(outcome.details.joined(separator: ", ")))"
+                return "  \(outcome.displayName): \(outcome.status.rawValue) - \(outcome.message)\(detail)"
+            }
+            return "  \(Self.agentDisplayName(for: kind)): idle - no outcome recorded yet"
+        }
+        return (["FXBacktest agents:"] + lines).joined(separator: "\n")
+    }
+
+    private func agentStateSummaryLine() -> String {
+        let recorded = agentOutcomes.values
+        guard !recorded.isEmpty else { return "idle" }
+        let failures = recorded.filter { $0.status == .failed }.count
+        let warnings = recorded.filter { $0.status == .warning }.count
+        let ok = recorded.filter { $0.status == .ok }.count
+        return "\(ok) ok, \(warnings) warning, \(failures) failed"
+    }
+
+    private static func agentDisplayName(for kind: FXBacktestAgentKind) -> String {
+        switch kind {
+        case .fxExportConnectivity:
+            return FXExportConnectivityAgent.descriptor.displayName
+        case .marketReadiness:
+            return MarketReadinessAgent.descriptor.displayName
+        case .executionSnapshot:
+            return ExecutionSnapshotAgent.descriptor.displayName
+        case .optimizationRunCoordinator:
+            return OptimizationRunCoordinatorAgent.descriptor.displayName
+        case .resultPersistence:
+            return ResultPersistenceAgent.descriptor.displayName
+        case .pluginValidation:
+            return PluginValidationAgent.descriptor.displayName
+        case .resourceHealth:
+            return ResourceHealthAgent.descriptor.displayName
+        }
     }
 
     private func pluginSummary() -> String {

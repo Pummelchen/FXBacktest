@@ -39,7 +39,8 @@ let package = Package(
             name: "FXBacktestCoreTests",
             dependencies: [
                 "FXBacktestCore",
-                "FXBacktestPlugins"
+                "FXBacktestPlugins",
+                .product(name: "FXExportFXBacktestAPI", package: "MT5Research")
             ]
         )
     ],

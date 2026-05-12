@@ -14,6 +14,7 @@ The goal is similar to the MT5 Strategy Tester optimization view: define a matri
 - Optional GPU execution through Metal for plugins that provide a matching compute kernel.
 - Hybrid CPU+GPU execution that shares the pass matrix across CPU workers and Metal for maximum throughput.
 - Plugin acceleration descriptor/IR scaffold for future generated Swift SIMD and Metal kernels.
+- Seven operational agents for FXExport connectivity, market readiness, execution snapshots, run coordination, result persistence, plugin validation, and resource health.
 - Read-only FXExport data loading through the dedicated FXBacktest API v1.
 - Pre-run MT5 execution snapshot through FXExport API v1 for bid/ask, spread, swap, margin, lot limits, and account leverage.
 - ClickHouse-backed FXBacktest result-store API for optimization results only, including explicit purge commands.
@@ -37,6 +38,8 @@ Tests/
 Important files:
 
 - `Sources/FXBacktestCore/PluginAPI.swift`: Plugin API v1.
+- `Sources/FXBacktestCore/AgentTypes.swift`: shared operational-agent status/outcome types.
+- `Sources/FXBacktestCore/OperationalAgents.swift`: seven production agents used by the resident app lifecycle.
 - `Sources/FXBacktestCore/CPUBacktestExecutor.swift`: whole-pass CPU optimization.
 - `Sources/FXBacktestCore/MetalBacktestExecutor.swift`: plugin-provided Metal kernel runner.
 - `Sources/FXBacktestCore/HybridBacktestExecutor.swift`: shared CPU+Metal pass scheduling.
@@ -140,6 +143,7 @@ Do not pass launch-time parameters. FXBacktest starts the SwiftUI backtester and
 ```
 
 Paste commands into that prompt while the app keeps running. Status messages continue to print to the terminal, and the SwiftUI live table updates at the same time.
+The `status` command includes an agent count summary; `agents` prints the latest outcome for each operational agent.
 
 FXBacktest has no supported executable flags. Extra text after `swift run FXBacktest` is ignored and cannot change app settings, data selection, plugin selection, run settings, or parameter ranges. All operator input belongs in commands typed after the resident `>` prompt.
 
@@ -240,6 +244,7 @@ Useful commands:
 
 ```text
 status
+agents
 config
 plugins
 plugin <plugin-id-or-display-name>
@@ -261,6 +266,24 @@ exit
 ```
 
 `set --persist-results true` streams future optimization rows into ClickHouse through `BacktestResultStore`. `save-results` persists a point-in-time snapshot of the currently retained in-memory result rows. `clean-backtest-data` is the purge command for old or unwanted optimization result data.
+
+## Operational Agents
+
+FXBacktest now runs seven small production agents at app boundaries where correctness matters. They are preflight and lifecycle checks, not per-pass hot-loop work:
+
+- `FXExport Connectivity`: verifies `GET /v1/status` and the API version before FXExport-backed loads.
+- `Market Readiness`: validates aligned, non-empty M1 OHLC universes and rejects demo/FXExport mixes.
+- `Execution Snapshot`: pulls current MT5 execution terms through FXExport API v1 and enforces hedging mode.
+- `Optimization Run Coordinator`: validates the target, sweep, workers, chunk size, deposit, lot size, and immutable run settings.
+- `Result Persistence`: owns ClickHouse result run start, buffered writes, finalization, snapshot saves, and purge commands.
+- `Plugin Validation`: validates Plugin API v1 descriptors, parameters, acceleration descriptors, and Metal declarations.
+- `Resource Health`: checks CPU worker pressure, Metal availability, thermal state, memory, and disk headroom.
+
+Use `agents` in the resident prompt to inspect the latest outcome:
+
+```text
+> agents
+```
 
 ## FXExport Data Contract
 
@@ -472,6 +495,7 @@ The test suite includes:
 - FXStupid multi-symbol universe behavior.
 - ClickHouse result-store SQL/purge API behavior with a mock executor.
 - Plugin acceleration descriptor validation.
+- Operational-agent validation for FXExport connectivity, market readiness, plugin metadata, execution snapshot fallback, run coordination, resource health, and result persistence.
 
 ## GitHub Wiki
 
@@ -481,6 +505,7 @@ Project documentation is also published in the GitHub Wiki:
 - Quickstart Guide
 - FXExport Data Provider
 - Architecture
+- Operational Agents
 - Plugin API v1
 - CPU and Metal Optimization
 - Troubleshooting
@@ -488,4 +513,4 @@ Project documentation is also published in the GitHub Wiki:
 
 ## Status
 
-FXBacktest is in the first functional engine/app stage. It can load demo data, load single-symbol or aligned multi-symbol verified FXExport data, pull current MT5 execution snapshots through FXExport before each non-demo run, run CPU, Metal, or hybrid CPU+Metal optimizations for plugins that provide a kernel, and persist optimization results to ClickHouse through its own result-store API. Future work should add more converted EA plugins, fuller generated-kernel acceleration, broker-specific commission/slippage enrichment, and optional single-pass reporting.
+FXBacktest is in the first functional engine/app stage. It can load demo data, load single-symbol or aligned multi-symbol verified FXExport data, supervise runs through seven operational agents, pull current MT5 execution snapshots through FXExport before each non-demo run, run CPU, Metal, or hybrid CPU+Metal optimizations for plugins that provide a kernel, and persist optimization results to ClickHouse through its own result-store API. Future work should add more converted EA plugins, fuller generated-kernel acceleration, broker-specific commission/slippage enrichment, and optional single-pass reporting.
