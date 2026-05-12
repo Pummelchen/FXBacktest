@@ -1,5 +1,5 @@
-import BacktestCore
 import Foundation
+import FXBacktestAPI
 
 public struct FXBacktestMarketMetadata: Hashable, Sendable {
     public let brokerSourceId: String
@@ -81,21 +81,22 @@ public struct OhlcDataSeries: Sendable {
         self.close = close
     }
 
-    public init(series: ColumnarOhlcSeries) throws {
+    public init(response: FXBacktestM1HistoryResponse) throws {
+        try response.validate()
         try self.init(
             metadata: FXBacktestMarketMetadata(
-                brokerSourceId: series.metadata.brokerSourceId.rawValue,
-                logicalSymbol: series.metadata.logicalSymbol.rawValue,
-                timeframe: series.metadata.timeframe.rawValue,
-                digits: series.metadata.digits.rawValue,
-                firstUtc: series.metadata.firstUtc?.rawValue,
-                lastUtc: series.metadata.lastUtc?.rawValue
+                brokerSourceId: response.metadata.brokerSourceId,
+                logicalSymbol: response.metadata.logicalSymbol,
+                timeframe: response.metadata.timeframe,
+                digits: response.metadata.digits,
+                firstUtc: response.metadata.firstUtc,
+                lastUtc: response.metadata.lastUtc
             ),
-            utcTimestamps: ContiguousArray(series.utcTimestamps),
-            open: ContiguousArray(series.open),
-            high: ContiguousArray(series.high),
-            low: ContiguousArray(series.low),
-            close: ContiguousArray(series.close)
+            utcTimestamps: ContiguousArray(response.utcTimestamps),
+            open: ContiguousArray(response.open),
+            high: ContiguousArray(response.high),
+            low: ContiguousArray(response.low),
+            close: ContiguousArray(response.close)
         )
     }
 

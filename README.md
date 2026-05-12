@@ -10,9 +10,9 @@ The goal is similar to the MT5 Strategy Tester optimization view: define a matri
 - Plugin API v1 for converted MQL5 EAs stored as optimized single-file Swift plugins.
 - CPU optimizer that splits work by complete backtest pass across workers.
 - Optional Metal execution for plugins that provide a matching Metal compute kernel.
-- Read-only FXExport data loading through verified canonical M1 OHLC in ClickHouse.
+- Read-only FXExport data loading through the dedicated FXBacktest API v1.
 - Live pass table with profit, drawdown, trades, win rate, profit factor, and parameters.
-- Demo data mode for UI and engine testing when FXExport/ClickHouse is not running.
+- Demo data mode for UI and engine testing when the FXExport API is not running.
 
 ## Repository Layout
 
@@ -31,7 +31,7 @@ Important files:
 - `Sources/FXBacktestCore/PluginAPI.swift`: Plugin API v1.
 - `Sources/FXBacktestCore/CPUBacktestExecutor.swift`: whole-pass CPU optimization.
 - `Sources/FXBacktestCore/MetalBacktestExecutor.swift`: plugin-provided Metal kernel runner.
-- `Sources/FXBacktestCore/FXExportHistoryLoader.swift`: FXExport/ClickHouse data bridge.
+- `Sources/FXBacktestCore/FXExportHistoryLoader.swift`: FXExport FXBacktest API v1 client bridge.
 - `Sources/FXBacktestPlugins/MovingAverageCrossPlugin.swift`: reference EA plugin.
 
 ## Requirements
@@ -97,7 +97,7 @@ The first screen is the working backtester, not a setup wizard. It includes:
 
 ### 4. Run A Demo Backtest
 
-Use this when FXExport or ClickHouse is not running.
+Use this when the FXExport API is not running.
 
 1. Launch FXBacktest.
 2. Select `Moving Average Cross`.
@@ -110,42 +110,58 @@ The pass table updates live and sorts the best results by net profit.
 
 ### 5. Run A Backtest With FXExport Data
 
-FXExport is responsible for historical data ingestion, broker UTC mapping, verification, repair, and ClickHouse storage. FXBacktest only reads verified data.
+FXExport is responsible for historical data ingestion, broker UTC mapping, verification, repair, and internal storage. FXBacktest only reads verified data through FXExport's dedicated FXBacktest API v1. FXBacktest must not connect to ClickHouse directly.
 
 In FXExport, prepare the data first:
 
 ```bash
 cd ../FXExport/MT5Research
 swift build -c release
-.build/release/FXExport startcheck --config-dir Config --migrations-dir Migrations
-.build/release/FXExport backfill --config-dir Config --symbols all
-.build/release/FXExport verify --config-dir Config --random-ranges 20
+.build/release/FXExport
 ```
+
+At the FXExport `>` prompt, run:
+
+```text
+> startcheck --config-dir Config --migrations-dir Migrations
+> backfill --config-dir Config --symbols all
+> verify --config-dir Config --random-ranges 20
+> fxbacktest-api --config-dir Config --api-host 127.0.0.1 --api-port 5066
+```
+
+Leave FXExport running while FXBacktest loads data.
 
 Then in FXBacktest:
 
-1. Set ClickHouse URL, usually `http://127.0.0.1:8123`.
-2. Set database, usually `fxexport`.
-3. Set broker source id, for example `icmarkets-sc-mt5-4`.
-4. Set logical symbol, for example `EURUSD`.
-5. Set expected MT5 symbol and digits.
-6. Set UTC start/end epoch seconds, minute-aligned.
-7. Click `Load FXExport`.
-8. Select CPU or Metal.
-9. Edit the parameter matrix.
-10. Click `Run`.
+1. Set FXExport API URL, usually `http://127.0.0.1:5066`.
+2. Set broker source id, for example `icmarkets-sc-mt5-4`.
+3. Set logical symbol, for example `EURUSD`.
+4. Set expected MT5 symbol and digits.
+5. Set UTC start/end epoch seconds, minute-aligned.
+6. Click `Load FXExport`.
+7. Select CPU or Metal.
+8. Edit the parameter matrix.
+9. Click `Run`.
 
 If FXExport reports missing verified coverage, bad hashes, mixed digits, duplicate timestamps, invalid OHLC rows, or unsafe ingestion state, FXBacktest fails closed instead of running against questionable data.
 
 ## FXExport Data Contract
 
-FXBacktest consumes FXExport through the `FXExportHistoryData` SwiftPM product. The data path is:
+FXBacktest consumes FXExport only through the dedicated FXBacktest API v1:
+
+- API version: `fxexport.fxbacktest.history.v1`
+- Status endpoint: `GET /v1/status`
+- M1 history endpoint: `POST /v1/history/m1`
+
+FXBacktest imports the small `FXExportFXBacktestAPI` SwiftPM product for v1 DTOs and the HTTP client. That module does not expose ClickHouse, FXExport internals, or the old direct history provider.
+
+The data path is:
 
 ```text
 MT5 + FXExport EA
   -> FXExport Swift ingestion
-  -> ClickHouse canonical M1 OHLC
-  -> FXExport verified history-data API
+  -> FXExport internal canonical M1 OHLC storage
+  -> FXExport FXBacktest API v1
   -> FXBacktest OhlcDataSeries
   -> CPU or Metal optimization
 ```

@@ -24,10 +24,7 @@ final class AppModel: ObservableObject {
     @Published var contractSize: Double = 100_000
     @Published var lotSize: Double = 0.10
 
-    @Published var connectionURLText = "http://127.0.0.1:8123"
-    @Published var database = "fxexport"
-    @Published var username = ""
-    @Published var password = ""
+    @Published var apiURLText = "http://127.0.0.1:5066"
     @Published var brokerSourceId = "icmarkets-sc-mt5-4"
     @Published var logicalSymbol = "EURUSD"
     @Published var expectedMT5Symbol = "EURUSD"
@@ -97,17 +94,14 @@ final class AppModel: ObservableObject {
     }
 
     func loadFXExportData() {
-        guard let url = URL(string: connectionURLText) else {
-            statusText = "Invalid ClickHouse URL"
+        guard let url = URL(string: apiURLText) else {
+            statusText = "Invalid FXExport API URL"
             return
         }
         isLoadingData = true
-        statusText = "Loading verified M1 OHLC from FXExport..."
+        statusText = "Loading verified M1 OHLC through FXExport API v1..."
         let connection = FXExportConnectionSettings(
-            url: url,
-            database: database,
-            username: username,
-            password: password,
+            apiBaseURL: url,
             requestTimeoutSeconds: 120
         )
         let request = FXExportHistoryRequest(

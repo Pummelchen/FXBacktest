@@ -84,13 +84,8 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 10) {
                 Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
                     GridRow {
-                        Text("ClickHouse")
-                        TextField("URL", text: $model.connectionURLText)
-                            .textFieldStyle(.roundedBorder)
-                    }
-                    GridRow {
-                        Text("Database")
-                        TextField("Database", text: $model.database)
+                        Text("FXExport API")
+                        TextField("URL", text: $model.apiURLText)
                             .textFieldStyle(.roundedBorder)
                     }
                     GridRow {

@@ -18,8 +18,7 @@ let package = Package(
         .target(
             name: "FXBacktestCore",
             dependencies: [
-                .product(name: "FXExportHistoryData", package: "MT5Research"),
-                .product(name: "FXExportMetalData", package: "MT5Research")
+                .product(name: "FXExportFXBacktestAPI", package: "MT5Research")
             ]
         ),
         .target(
