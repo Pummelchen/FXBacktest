@@ -14,6 +14,7 @@ The goal is similar to the MT5 Strategy Tester optimization view: define a matri
 - Optional Metal execution for plugins that provide a matching Metal compute kernel.
 - Plugin acceleration descriptor/IR scaffold for future generated Swift SIMD and Metal kernels.
 - Read-only FXExport data loading through the dedicated FXBacktest API v1.
+- Pre-run MT5 execution snapshot through FXExport API v1 for bid/ask, spread, swap, margin, lot limits, and account leverage.
 - ClickHouse-backed FXBacktest result-store API for optimization results only, including explicit purge commands.
 - Live pass table with profit, drawdown, trades, win rate, profit factor, and parameters.
 - Resident terminal command shell with `>` prompt for loading data, changing settings, starting runs, stopping active work, and checking status without relaunching.
@@ -40,6 +41,7 @@ Important files:
 - `Sources/FXBacktestCore/ExecutionModel.swift`: broker/execution v2 model and deterministic broker simulator.
 - `Sources/FXBacktestCore/OhlcMarketUniverse.swift`: aligned multi-symbol OHLC universe.
 - `Sources/FXBacktestCore/FXExportHistoryLoader.swift`: FXExport FXBacktest API v1 client bridge.
+- `Sources/FXBacktestCore/FXExportExecutionLoader.swift`: pre-run MT5 execution metadata loader.
 - `Sources/FXBacktestCore/BacktestResultStore.swift`: ClickHouse result-store API and purge support.
 - `Sources/FXBacktestCore/PluginAcceleration.swift`: plugin acceleration descriptor and IR v1.
 - `Sources/FXBacktestPlugins/MovingAverageCrossPlugin.swift`: reference EA plugin.
@@ -158,7 +160,7 @@ At the FXExport `>` prompt, run:
 > fxbacktest-api --config-dir Config --api-host 127.0.0.1 --api-port 5066
 ```
 
-Leave FXExport running while FXBacktest loads data.
+Leave FXExport running while FXBacktest loads data and while a run starts. FXBacktest loads historical M1 OHLC first, then immediately before each backtest run it asks FXExport for current MT5 execution terms for every loaded symbol.
 
 Then in FXBacktest:
 
@@ -171,6 +173,8 @@ Then in FXBacktest:
 7. Select CPU or Metal.
 8. Edit the parameter matrix.
 9. Click `Run`.
+
+Before the first optimization pass starts, FXBacktest calls FXExport API v1 `POST /v1/execution/spec` for all symbols in the loaded market universe. FXExport reads the live MT5 terminal through the FXExport EA bridge and returns a deterministic hedging-account execution snapshot: bid, ask, spread, floating-spread flag, contract size, min/step/max lots, swap long/short, swap mode, margin estimates, tick values, trade mode, account currency, and leverage. If the live execution snapshot is unavailable, the run fails closed instead of falling back silently. Demo data is the only exception and uses explicit deterministic demo execution terms.
 
 The same flow from the FXBacktest terminal prompt is:
 
@@ -189,7 +193,7 @@ For multi-symbol EAs such as FXStupid, load an aligned market universe in one co
 > run cpu --workers 8 --chunk 128
 ```
 
-Single-symbol `--symbol`, `--mt5-symbol`, and `--digits` validation remains available for strict one-pair runs. Multi-symbol loading intentionally omits one global `--digits` value because different symbols can use different MT5 digits.
+Single-symbol `--symbol`, `--mt5-symbol`, and `--digits` validation remains available for strict one-pair loads. For multi-symbol loads, FXBacktest stores the MT5 symbol and digits returned by FXExport for each symbol and uses those exact values in the pre-run execution snapshot request.
 
 If FXExport reports missing verified coverage, bad hashes, mixed digits, duplicate timestamps, invalid OHLC rows, or unsafe ingestion state, FXBacktest fails closed instead of running against questionable data.
 
@@ -232,6 +236,7 @@ FXBacktest consumes FXExport only through the dedicated FXBacktest API v1:
 - API version: `fxexport.fxbacktest.history.v1`
 - Status endpoint: `GET /v1/status`
 - M1 history endpoint: `POST /v1/history/m1`
+- Execution snapshot endpoint: `POST /v1/execution/spec`
 
 FXBacktest imports the small `FXExportFXBacktestAPI` SwiftPM product for v1 DTOs and the HTTP client. That module does not expose ClickHouse, FXExport internals, or the old direct history provider.
 
@@ -255,6 +260,17 @@ FXBacktest expects:
 - Complete verified coverage for the requested UTC range.
 - Matching broker source, logical symbol, MT5 symbol, and digits.
 
+Before every non-demo run, FXBacktest also expects FXExport to provide current MT5 execution metadata through the same API v1 boundary:
+
+```text
+MT5 terminal + FXExport EA
+  -> FXExport FXBacktest API v1 /v1/execution/spec
+  -> FXBacktest FXExportExecutionLoader
+  -> BacktestRunSettings.executionProfile
+```
+
+That execution snapshot is requested for each symbol in the loaded run and is bound to the broker source, MT5 symbol, and digits from the already loaded FXExport history metadata. FXBacktest does not use stale UI fields or direct database reads to infer execution terms.
+
 Direct ClickHouse access is forbidden for historical Forex OHLC data. The only ClickHouse exception in FXBacktest is the local optimization result-store API, which writes and purges FXBacktest result tables:
 
 - `fxbacktest_runs`
@@ -275,6 +291,8 @@ That result-store API is separate from FXExport history storage and must not be 
 - Hedging or netting accounting mode.
 - Margin fields.
 - Position lifecycle and closed-trade ledger.
+
+For FXExport-backed runs, the v2 execution profile is pulled from MT5 immediately before the run starts. The account model is always `hedging`. MT5 does not expose a reliable static symbol commission or tester slippage model through `SymbolInfo*`, so the API carries explicit source fields: commission currently defaults to `0` with source `not_exposed_by_mt5_symbol_info`, and slippage defaults to deterministic zero with source `deterministic_zero_default`. Those source fields are part of the model so broker-specific commission or slippage can later be added without hiding assumptions.
 
 The older `BacktestBroker` remains available for simple plugins. New or upgraded plugins should use the v2 execution types when fidelity matters.
 
@@ -434,4 +452,4 @@ Project documentation is also published in the GitHub Wiki:
 
 ## Status
 
-FXBacktest is in the first functional engine/app stage. It can load demo data, load single-symbol or aligned multi-symbol verified FXExport data, run CPU optimizations, run Metal optimizations for plugins that provide a kernel, and persist optimization results to ClickHouse through its own result-store API. Future work should add more converted EA plugins, MT5-imported execution specs from FXExport's EA bridge, fuller generated-kernel acceleration, and optional single-pass reporting.
+FXBacktest is in the first functional engine/app stage. It can load demo data, load single-symbol or aligned multi-symbol verified FXExport data, pull current MT5 execution snapshots through FXExport before each non-demo run, run CPU optimizations, run Metal optimizations for plugins that provide a kernel, and persist optimization results to ClickHouse through its own result-store API. Future work should add more converted EA plugins, fuller generated-kernel acceleration, broker-specific commission/slippage enrichment, and optional single-pass reporting.

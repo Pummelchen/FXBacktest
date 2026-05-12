@@ -4,6 +4,7 @@ import FXBacktestAPI
 public struct FXBacktestMarketMetadata: Hashable, Sendable {
     public let brokerSourceId: String
     public let logicalSymbol: String
+    public let mt5Symbol: String?
     public let timeframe: String
     public let digits: Int
     public let firstUtc: Int64?
@@ -12,6 +13,7 @@ public struct FXBacktestMarketMetadata: Hashable, Sendable {
     public init(
         brokerSourceId: String,
         logicalSymbol: String,
+        mt5Symbol: String? = nil,
         timeframe: String = "M1",
         digits: Int,
         firstUtc: Int64? = nil,
@@ -19,6 +21,7 @@ public struct FXBacktestMarketMetadata: Hashable, Sendable {
     ) {
         self.brokerSourceId = brokerSourceId
         self.logicalSymbol = logicalSymbol
+        self.mt5Symbol = mt5Symbol
         self.timeframe = timeframe
         self.digits = digits
         self.firstUtc = firstUtc
@@ -90,6 +93,7 @@ public struct OhlcDataSeries: Sendable {
             metadata: FXBacktestMarketMetadata(
                 brokerSourceId: response.metadata.brokerSourceId,
                 logicalSymbol: response.metadata.logicalSymbol,
+                mt5Symbol: response.metadata.mt5Symbol,
                 timeframe: response.metadata.timeframe,
                 digits: response.metadata.digits,
                 firstUtc: response.metadata.firstUtc,
@@ -150,6 +154,7 @@ public extension OhlcDataSeries {
             metadata: FXBacktestMarketMetadata(
                 brokerSourceId: "demo",
                 logicalSymbol: "EURUSD",
+                mt5Symbol: "EURUSD",
                 digits: 5,
                 firstUtc: utc.first,
                 lastUtc: utc.last

@@ -98,6 +98,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     private var dataLoadTask: Task<Void, Never>?
     private var terminalCommandShellStarted = false
     private var lastTerminalProgressLog = Date.distantPast
+    private var lastRunSettings: BacktestRunSettings?
 
     init() {
         let first = FXBacktestPluginRegistry.availablePlugins.first!
@@ -141,6 +142,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         selectedPluginID = pluginID
         parameterRows = Self.rows(for: selectedPlugin)
         results = []
+        lastRunSettings = nil
         resultInitialDeposit = initialDeposit
         progress = BacktestProgress(completedPasses: 0, totalPasses: 0, elapsedSeconds: 0)
         if executionTarget == .metal, selectedPlugin.metalKernel == nil {
@@ -160,6 +162,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
             market = try OhlcDataSeries.demoEURUSD()
             marketUniverse = market?.universe
             results = []
+            lastRunSettings = nil
             resultInitialDeposit = initialDeposit
             if let market {
                 updateStatus("Loaded demo \(market.metadata.logicalSymbol) M1 data: \(market.count) bars", log: .success)
@@ -224,6 +227,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
                         self.market = loaded
                         self.marketUniverse = loadedUniverse
                         self.results = []
+                        self.lastRunSettings = nil
                         self.resultInitialDeposit = self.initialDeposit
                         self.updateStatus("Loaded \(loadedUniverse.symbols.joined(separator: ",")) M1 data: \(loaded.count) aligned verified bars", log: .success)
                     }
@@ -271,42 +275,46 @@ final class AppModel: ObservableObject, @unchecked Sendable {
             return
         }
 
-        let executionProfile: FXBacktestExecutionProfile
-        do {
-            executionProfile = try makeExecutionProfile(for: marketUniverse)
-        } catch {
-            updateStatus(String(describing: error), log: .error)
-            return
-        }
-        let settings = BacktestRunSettings(
-            target: executionTarget,
-            maxWorkers: maxWorkers,
-            chunkSize: chunkSize,
-            initialDeposit: initialDeposit,
-            contractSize: contractSize,
-            lotSize: lotSize,
-            executionProfile: executionProfile
-        )
         let plugin = selectedPlugin
         let optimizer = BacktestOptimizer()
+        let target = executionTarget
+        let workers = maxWorkers
+        let chunk = chunkSize
+        let deposit = initialDeposit
+        let configuredContractSize = contractSize
+        let configuredLotSize = lotSize
 
         results = []
-        resultInitialDeposit = settings.initialDeposit
+        lastRunSettings = nil
+        resultInitialDeposit = deposit
         progress = BacktestProgress(completedPasses: 0, totalPasses: sweep.combinationCount, elapsedSeconds: 0)
         isRunning = true
         lastTerminalProgressLog = .distantPast
-        updateStatus("Running \(plugin.descriptor.displayName) on \(settings.target.rawValue.uppercased())...")
+        updateStatus("Loading current MT5 execution terms for \(marketUniverse.symbols.joined(separator: ","))...")
 
         runTask = Task {
-            let persistence = await startPersistenceIfEnabled(
-                plugin: plugin,
-                marketUniverse: marketUniverse,
-                sweep: sweep,
-                settings: settings
-            )
             var finalProgress: BacktestProgress?
             var completionStatus = "completed"
+            var persistence: BacktestResultPersistenceBuffer?
             do {
+                let executionProfile = try await loadExecutionProfileForRun(marketUniverse)
+                let settings = BacktestRunSettings(
+                    target: target,
+                    maxWorkers: workers,
+                    chunkSize: chunk,
+                    initialDeposit: deposit,
+                    contractSize: configuredContractSize,
+                    lotSize: configuredLotSize,
+                    executionProfile: executionProfile
+                )
+                lastRunSettings = settings
+                updateStatus("Running \(plugin.descriptor.displayName) on \(settings.target.rawValue.uppercased()) with current MT5 execution terms...")
+                persistence = await startPersistenceIfEnabled(
+                    plugin: plugin,
+                    marketUniverse: marketUniverse,
+                    sweep: sweep,
+                    settings: settings
+                )
                 for try await event in optimizer.run(plugin: plugin, marketUniverse: marketUniverse, sweep: sweep, settings: settings) {
                     handle(event)
                     switch event {
@@ -485,7 +493,47 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         return result
     }
 
-    private func makeExecutionProfile(for universe: OhlcMarketUniverse) throws -> FXBacktestExecutionProfile {
+    private func loadExecutionProfileForRun(_ universe: OhlcMarketUniverse) async throws -> FXBacktestExecutionProfile {
+        if universe.seriesBySymbol.values.allSatisfy({ $0.metadata.brokerSourceId == "demo" }) {
+            updateStatus("Demo data has no live MT5 execution snapshot; using deterministic demo execution terms.", log: .warning)
+            return try makeFallbackExecutionProfile(for: universe)
+        }
+        guard universe.seriesBySymbol.values.allSatisfy({ $0.metadata.brokerSourceId != "demo" }) else {
+            throw FXBacktestError.invalidMarketData("Cannot mix demo and FXExport market data in one backtest run.")
+        }
+        let brokerSourceIds = Set(universe.seriesBySymbol.values.map(\.metadata.brokerSourceId))
+        guard brokerSourceIds.count == 1, let runBrokerSourceId = brokerSourceIds.first else {
+            throw FXBacktestError.invalidMarketData("All symbols in one backtest run must come from the same FXExport broker source.")
+        }
+        guard let url = URL(string: apiURLText) else {
+            throw FXBacktestError.invalidParameter("Invalid FXExport API URL.")
+        }
+        let symbols = try universe.symbols.map { symbol in
+            guard let series = universe[symbol] else {
+                throw FXBacktestError.invalidMarketData("Missing loaded market data for \(symbol).")
+            }
+            let mt5Symbol = series.metadata.mt5Symbol?.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let mt5Symbol, !mt5Symbol.isEmpty else {
+                throw FXBacktestError.invalidMarketData("\(symbol) is missing its FXExport MT5 symbol metadata.")
+            }
+            return FXExportExecutionSymbolRequest(
+                logicalSymbol: symbol,
+                expectedMT5Symbol: mt5Symbol,
+                expectedDigits: series.metadata.digits
+            )
+        }
+        let profile = try await FXExportExecutionLoader().load(
+            connection: FXExportConnectionSettings(apiBaseURL: url, requestTimeoutSeconds: 60),
+            request: FXExportExecutionRequest(
+                brokerSourceId: runBrokerSourceId,
+                symbols: symbols
+            )
+        )
+        updateStatus("Loaded MT5 execution terms for \(profile.symbols.count) symbols; account mode hedging", log: .success)
+        return profile
+    }
+
+    private func makeFallbackExecutionProfile(for universe: OhlcMarketUniverse) throws -> FXBacktestExecutionProfile {
         var specs: [String: FXBacktestSymbolExecutionSpec] = [:]
         for symbol in universe.symbols {
             guard let series = universe[symbol] else { continue }
@@ -500,6 +548,8 @@ final class AppModel: ObservableObject, @unchecked Sendable {
                 spreadPoints: 0,
                 slippagePoints: 0,
                 commissionPerLotPerSide: 0,
+                commissionSource: "demo_fallback",
+                slippageSource: "demo_fallback",
                 marginRate: 0
             )
         }
@@ -542,7 +592,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
             let run = BacktestStoredRun(
                 pluginIdentifier: plugin.descriptor.id,
                 engine: settings.target,
-                brokerSourceId: brokerSourceId,
+                brokerSourceId: settings.executionProfile.brokerSourceId,
                 primarySymbol: marketUniverse.primarySymbol,
                 symbols: marketUniverse.symbols,
                 settings: settings,
@@ -625,6 +675,7 @@ extension AppModel {
                 await stopActiveWorkAndWait(reason: "reset parameters")
                 parameterRows = Self.rows(for: selectedPlugin)
                 results = []
+                lastRunSettings = nil
                 resultInitialDeposit = initialDeposit
                 updateStatus("Reset parameters for \(selectedPlugin.descriptor.displayName)", log: .success)
             case "exit", "quit":
@@ -736,20 +787,20 @@ extension AppModel {
         guard let activeUniverse else {
             throw TerminalCommandError.invalidValue("Load market data before saving results.")
         }
-        let settings = BacktestRunSettings(
+        let settings = try lastRunSettings ?? BacktestRunSettings(
             target: executionTarget,
             maxWorkers: maxWorkers,
             chunkSize: chunkSize,
             initialDeposit: resultInitialDeposit,
             contractSize: contractSize,
             lotSize: lotSize,
-            executionProfile: try makeExecutionProfile(for: activeUniverse)
+            executionProfile: makeFallbackExecutionProfile(for: activeUniverse)
         )
         let run = BacktestStoredRun(
             runID: runID,
             pluginIdentifier: selectedPlugin.descriptor.id,
-            engine: executionTarget,
-            brokerSourceId: brokerSourceId,
+            engine: settings.target,
+            brokerSourceId: settings.executionProfile.brokerSourceId,
             primarySymbol: activeUniverse.primarySymbol,
             symbols: activeUniverse.symbols,
             settings: settings,
@@ -811,6 +862,7 @@ extension AppModel {
         }
 
         results = []
+        lastRunSettings = nil
         resultInitialDeposit = initialDeposit
         updateStatus("Updated FXBacktest settings", log: .success)
     }
@@ -865,6 +917,7 @@ extension AppModel {
         await stopActiveWorkAndWait(reason: "update parameter")
         parameterRows[index] = row
         results = []
+        lastRunSettings = nil
         resultInitialDeposit = initialDeposit
         updateStatus("Updated parameter \(row.definition.key)", log: .success)
     }

@@ -21,10 +21,15 @@ public struct FXBacktestSymbolExecutionSpec: Codable, Hashable, Sendable {
     public var spreadPoints: Int64
     public var slippagePoints: Int64
     public var commissionPerLotPerSide: Double
+    public var commissionSource: String
+    public var slippageSource: String
     public var swapLongPerLot: Double
     public var swapShortPerLot: Double
     public var marginInitialPerLot: Double?
     public var marginRate: Double
+    public var bid: Double?
+    public var ask: Double?
+    public var capturedAtUtc: Int64?
 
     public init(
         logicalSymbol: String,
@@ -37,10 +42,15 @@ public struct FXBacktestSymbolExecutionSpec: Codable, Hashable, Sendable {
         spreadPoints: Int64 = 0,
         slippagePoints: Int64 = 0,
         commissionPerLotPerSide: Double = 0,
+        commissionSource: String = "not_configured",
+        slippageSource: String = "not_configured",
         swapLongPerLot: Double = 0,
         swapShortPerLot: Double = 0,
         marginInitialPerLot: Double? = nil,
-        marginRate: Double = 1.0 / 100.0
+        marginRate: Double = 1.0 / 100.0,
+        bid: Double? = nil,
+        ask: Double? = nil,
+        capturedAtUtc: Int64? = nil
     ) throws {
         self.logicalSymbol = logicalSymbol.uppercased()
         self.mt5Symbol = mt5Symbol
@@ -52,10 +62,15 @@ public struct FXBacktestSymbolExecutionSpec: Codable, Hashable, Sendable {
         self.spreadPoints = spreadPoints
         self.slippagePoints = slippagePoints
         self.commissionPerLotPerSide = commissionPerLotPerSide
+        self.commissionSource = commissionSource
+        self.slippageSource = slippageSource
         self.swapLongPerLot = swapLongPerLot
         self.swapShortPerLot = swapShortPerLot
         self.marginInitialPerLot = marginInitialPerLot
         self.marginRate = marginRate
+        self.bid = bid
+        self.ask = ask
+        self.capturedAtUtc = capturedAtUtc
         try validate()
     }
 
@@ -82,6 +97,10 @@ public struct FXBacktestSymbolExecutionSpec: Codable, Hashable, Sendable {
         guard commissionPerLotPerSide.isFinite else {
             throw FXBacktestError.invalidParameter("\(logicalSymbol): commission must be finite.")
         }
+        guard !commissionSource.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !slippageSource.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw FXBacktestError.invalidParameter("\(logicalSymbol): execution source fields must not be empty.")
+        }
         guard swapLongPerLot.isFinite, swapShortPerLot.isFinite else {
             throw FXBacktestError.invalidParameter("\(logicalSymbol): swap values must be finite.")
         }
@@ -92,6 +111,24 @@ public struct FXBacktestSymbolExecutionSpec: Codable, Hashable, Sendable {
         }
         guard marginRate.isFinite, marginRate >= 0 else {
             throw FXBacktestError.invalidParameter("\(logicalSymbol): margin rate must be >= 0.")
+        }
+        if let bid {
+            guard bid.isFinite, bid > 0 else {
+                throw FXBacktestError.invalidParameter("\(logicalSymbol): bid must be > 0 when supplied.")
+            }
+        }
+        if let ask {
+            guard ask.isFinite, ask > 0 else {
+                throw FXBacktestError.invalidParameter("\(logicalSymbol): ask must be > 0 when supplied.")
+            }
+        }
+        if let bid, let ask, ask < bid {
+            throw FXBacktestError.invalidParameter("\(logicalSymbol): ask must be >= bid when supplied.")
+        }
+        if let capturedAtUtc {
+            guard capturedAtUtc > 0 else {
+                throw FXBacktestError.invalidParameter("\(logicalSymbol): capturedAtUtc must be positive when supplied.")
+            }
         }
     }
 
@@ -134,6 +171,8 @@ public struct FXBacktestSymbolExecutionSpec: Codable, Hashable, Sendable {
             spreadPoints: 0,
             slippagePoints: 0,
             commissionPerLotPerSide: 0,
+            commissionSource: "fallback",
+            slippageSource: "fallback",
             marginRate: 0
         )
     }
