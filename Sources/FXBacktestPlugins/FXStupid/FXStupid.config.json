@@ -1,0 +1,112 @@
+{
+  "descriptor": {
+    "id": "com.fxbacktest.plugins.fxstupid.v1",
+    "display_name": "FXStupid",
+    "version": "1.0.0",
+    "summary": "Converted FX_Stupid_Original_Min MQL5 EA with pass-local state and FXExport M1 OHLC data.",
+    "author": "FXBacktest"
+  },
+  "fxpairs": "EURAUD,EURCAD,EURCHF,EURDKK,EURGBP,EURJPY,EURNOK,EURNZD,EURPLN,EURSEK,EURSGD,EURUSD,EURZAR,USDCAD,USDCHF,USDCZK,USDDKK,USDHUF,USDJPY,USDMXN,USDNOK,USDPLN,USDSEK,USDSGD,USDTHB,USDZAR",
+  "signal_timeframe": "PERIOD_M1",
+  "numeric_inputs": [
+    {
+      "key": "MaxOrders",
+      "display_name": "MaxOrders",
+      "value_kind": "integer",
+      "value": 5,
+      "minimum": 5,
+      "step": 1,
+      "maximum": 5
+    },
+    {
+      "key": "BarsLookBack",
+      "display_name": "BarsLookBack",
+      "value_kind": "integer",
+      "value": 5,
+      "minimum": 5,
+      "step": 1,
+      "maximum": 5
+    },
+    {
+      "key": "TrailStop",
+      "display_name": "TrailStop",
+      "value_kind": "boolean",
+      "value": 0,
+      "minimum": 0,
+      "step": 1,
+      "maximum": 0
+    },
+    {
+      "key": "TrailStepUp",
+      "display_name": "TrailStepUp",
+      "value_kind": "decimal",
+      "value": 10,
+      "minimum": 10,
+      "step": 1,
+      "maximum": 10
+    },
+    {
+      "key": "TrailStepDown",
+      "display_name": "TrailStepDown",
+      "value_kind": "decimal",
+      "value": 5,
+      "minimum": 5,
+      "step": 1,
+      "maximum": 5
+    },
+    {
+      "key": "LotSize",
+      "display_name": "LotSize",
+      "value_kind": "decimal",
+      "value": 0.01,
+      "minimum": 0.01,
+      "step": 0.01,
+      "maximum": 0.01
+    },
+    {
+      "key": "EAEqui_TP",
+      "display_name": "EAEqui_TP",
+      "value_kind": "decimal",
+      "value": 10,
+      "minimum": 10,
+      "step": 1,
+      "maximum": 10
+    },
+    {
+      "key": "EAEqui_SL",
+      "display_name": "EAEqui_SL",
+      "value_kind": "decimal",
+      "value": 10,
+      "minimum": 10,
+      "step": 1,
+      "maximum": 10
+    },
+    {
+      "key": "LotBooster",
+      "display_name": "LotBooster",
+      "value_kind": "decimal",
+      "value": 0,
+      "minimum": 0,
+      "step": 0.01,
+      "maximum": 0
+    },
+    {
+      "key": "EAStopMaxDD",
+      "display_name": "EAStopMaxDD",
+      "value_kind": "decimal",
+      "value": 80,
+      "minimum": 80,
+      "step": 1,
+      "maximum": 80
+    },
+    {
+      "key": "EAStopMinEqui",
+      "display_name": "EAStopMinEqui",
+      "value_kind": "decimal",
+      "value": 800,
+      "minimum": 800,
+      "step": 10,
+      "maximum": 800
+    }
+  ]
+}

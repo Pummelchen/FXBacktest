@@ -23,6 +23,7 @@ Sources/
   FXBacktest/                 SwiftUI macOS app
   FXBacktestCore/             engine, data model, FXExport loader, plugin API
   FXBacktestPlugins/          converted EA plugins
+    FXStupid/                 first converted EA plugin and config
 Tests/
   FXBacktestCoreTests/        engine, sweep, and Metal smoke tests
 ```
@@ -34,6 +35,8 @@ Important files:
 - `Sources/FXBacktestCore/MetalBacktestExecutor.swift`: plugin-provided Metal kernel runner.
 - `Sources/FXBacktestCore/FXExportHistoryLoader.swift`: FXExport FXBacktest API v1 client bridge.
 - `Sources/FXBacktestPlugins/MovingAverageCrossPlugin.swift`: reference EA plugin.
+- `Sources/FXBacktestPlugins/FXStupid/FXStupid.swift`: converted `FX_Stupid_Original_Min.mq5` plugin.
+- `Sources/FXBacktestPlugins/FXStupid/FXStupid.config.json`: FXStupid input/config defaults.
 
 ## Requirements
 
@@ -248,10 +251,22 @@ Plugin rules:
 - Do not share mutable globals across passes.
 - Treat OHLC arrays as read-only.
 - Return aggregate metrics for each pass.
-- Store converted EA plugins in `Sources/FXBacktestPlugins/`.
+- Store each converted EA plugin in its own subfolder under `Sources/FXBacktestPlugins/`, for example `Sources/FXBacktestPlugins/FXStupid/`.
 - Register plugins in `FXBacktestPluginRegistry`.
 
 Single-pass reports are intentionally not implemented yet. The current product focus is maximum optimizer throughput and a live pass table.
+
+### FXStupid
+
+`FXStupid` is the first converted MQL5 EA plugin. Its Swift file keeps the original EA flow close to the source:
+
+```text
+OnInit -> OnTick -> EAStop -> TPCheck -> SLCheck -> AdjustLotSizes -> RefreshTraded -> OrderScan
+```
+
+The original MQL5 `input` values are stored in `FXStupid.config.json` beside the plugin file and become FXBacktest parameter definitions. The plugin is CPU-only for now because preserving the EA control flow is more important than immediately rewriting it as a Metal kernel.
+
+Current limitation: FXBacktest currently supplies one loaded `OhlcDataSeries` to a plugin pass. FXStupid preserves the original multi-symbol scan loop, but symbols without loaded FXBacktest market data behave like unavailable MT5 symbols and are skipped.
 
 ## CPU And Metal Execution Model
 

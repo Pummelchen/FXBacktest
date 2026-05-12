@@ -119,7 +119,8 @@ public struct MovingAverageCrossPlugin: FXBacktestPluginV1 {
 
 public enum FXBacktestPluginRegistry {
     public static let availablePlugins: [AnyFXBacktestPlugin] = [
-        AnyFXBacktestPlugin(MovingAverageCrossPlugin())
+        AnyFXBacktestPlugin(MovingAverageCrossPlugin()),
+        AnyFXBacktestPlugin(FXStupid())
     ]
 }
 
