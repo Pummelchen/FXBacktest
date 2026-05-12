@@ -12,9 +12,9 @@ struct TerminalCommandSession: Sendable {
         }
 
         await TerminalLog.info("FXBacktest interactive command shell started")
-        await TerminalLog.info("Type `help` for commands. Paste commands at the `>` prompt; launch-time parameters are ignored.")
+        await TerminalLog.info("Type `help` for commands. Paste commands at the `>` prompt; FXBacktest accepts no launch-time options.")
         if !ignoredLaunchArguments.isEmpty {
-            await TerminalLog.warn("Launch-time input was ignored: \(ignoredLaunchArguments.joined(separator: " "))")
+            await TerminalLog.warn("Startup input ignored; no settings were changed: \(ignoredLaunchArguments.joined(separator: " "))")
         }
 
         while !Task.isCancelled {

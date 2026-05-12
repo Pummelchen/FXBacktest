@@ -98,6 +98,8 @@ Do not pass launch-time parameters. FXBacktest starts the SwiftUI backtester and
 
 Paste commands into that prompt while the app keeps running. Status messages continue to print to the terminal, and the SwiftUI live table updates at the same time.
 
+FXBacktest has no supported executable flags. Extra text after `swift run FXBacktest` is ignored and cannot change app settings, data selection, plugin selection, run settings, or parameter ranges. All operator input belongs in commands typed after the resident `>` prompt.
+
 The first screen is the working backtester, not a setup wizard. It includes:
 
 - EA plugin picker.
@@ -176,6 +178,8 @@ If FXExport reports missing verified coverage, bad hashes, mixed digits, duplica
 ## Terminal Command Shell
 
 FXBacktest is intended to stay open. If no backtest is active, it waits at the `>` prompt for the next command. State-changing commands gracefully stop active data loads or optimization runs before changing the app state.
+
+The `--api-url`, `--workers`, `--input`, and similar `--...` tokens below are command options typed inside the running app. They are not launch-time parameters.
 
 Useful commands:
 

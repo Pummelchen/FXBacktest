@@ -401,6 +401,7 @@ extension AppModel {
           exit
 
         State-changing commands gracefully stop active work before changing the app state.
+        FXBacktest has no launch-time options; use this resident command shell after startup.
         FXBacktest must load Forex history only through FXExport API v1, never ClickHouse directly.
         """
     }
