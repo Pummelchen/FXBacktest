@@ -65,7 +65,12 @@ public struct FXExportHistoryLoader: Sendable {
             )
                 .loadM1History(apiRequest)
             return try OhlcDataSeries(response: response)
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
+            if Task.isCancelled {
+                throw CancellationError()
+            }
             throw FXBacktestError.dataLoadFailed(String(describing: error))
         }
     }

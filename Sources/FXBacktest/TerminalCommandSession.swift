@@ -157,11 +157,23 @@ struct ParsedTerminalOptions {
         while index < tokens.endIndex {
             let token = tokens[index]
             if token.hasPrefix("--") {
-                let key = String(token.dropFirst(2)).lowercased()
-                let valueIndex = tokens.index(after: index)
+                let option = String(token.dropFirst(2))
+                if let equalIndex = option.firstIndex(of: "="), equalIndex > option.startIndex {
+                    let key = String(option[..<equalIndex]).lowercased()
+                    let value = String(option[option.index(after: equalIndex)...])
+                    guard !key.isEmpty, !value.isEmpty else {
+                        throw TerminalCommandError.missingValue(token)
+                    }
+                    options[key] = value
+                    index = tokens.index(after: index)
+                    continue
+                }
+
+                let key = option.lowercased()
                 guard !key.isEmpty else {
                     throw TerminalCommandError.unknownOption(token)
                 }
+                let valueIndex = tokens.index(after: index)
                 guard valueIndex < tokens.endIndex else {
                     throw TerminalCommandError.missingValue(token)
                 }

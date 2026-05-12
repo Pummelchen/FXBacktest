@@ -72,8 +72,14 @@ public struct OhlcDataSeries: Sendable {
             throw FXBacktestError.invalidMarketData("OHLC columns must have equal length.")
         }
         for index in 0..<rowCount {
+            guard utcTimestamps[index] > 0, utcTimestamps[index] % 60 == 0 else {
+                throw FXBacktestError.invalidMarketData("UTC timestamp at bar \(index) must be a positive minute-aligned epoch second.")
+            }
             if index > 0, utcTimestamps[index] <= utcTimestamps[index - 1] {
                 throw FXBacktestError.invalidMarketData("UTC timestamps must be strictly increasing.")
+            }
+            guard open[index] > 0, high[index] > 0, low[index] > 0, close[index] > 0 else {
+                throw FXBacktestError.invalidMarketData("OHLC prices must be positive at bar \(index).")
             }
             if high[index] < open[index] || high[index] < close[index] || low[index] > open[index] || low[index] > close[index] {
                 throw FXBacktestError.invalidMarketData("OHLC invariant failed at bar \(index).")

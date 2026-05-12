@@ -787,6 +787,10 @@ extension AppModel {
         guard let activeUniverse else {
             throw TerminalCommandError.invalidValue("Load market data before saving results.")
         }
+        let resultsSnapshot = results
+        let progressSnapshot = progress
+        let selectedPluginID = selectedPlugin.descriptor.id
+        let isRunActiveSnapshot = isRunning
         let settings = try lastRunSettings ?? BacktestRunSettings(
             target: executionTarget,
             maxWorkers: maxWorkers,
@@ -798,7 +802,7 @@ extension AppModel {
         )
         let run = BacktestStoredRun(
             runID: runID,
-            pluginIdentifier: selectedPlugin.descriptor.id,
+            pluginIdentifier: selectedPluginID,
             engine: settings.target,
             brokerSourceId: settings.executionProfile.brokerSourceId,
             primarySymbol: activeUniverse.primarySymbol,
@@ -807,11 +811,11 @@ extension AppModel {
             sweep: sweep,
             note: note
         )
-        updateStatus("Saving \(results.count.formatted()) held pass results to ClickHouse run \(runID)...")
+        updateStatus("Saving \(resultsSnapshot.count.formatted()) held pass results to ClickHouse run \(runID)...")
         try await store.startRun(run)
-        try await store.appendResults(results, runID: runID)
-        try await store.completeRun(runID: runID, progress: progress, status: isRunning ? "snapshot" : "completed")
-        updateStatus("Saved \(results.count.formatted()) pass results to ClickHouse run \(runID)", log: .success)
+        try await store.appendResults(resultsSnapshot, runID: runID)
+        try await store.completeRun(runID: runID, progress: progressSnapshot, status: isRunActiveSnapshot ? "snapshot" : "completed")
+        updateStatus("Saved \(resultsSnapshot.count.formatted()) pass results to ClickHouse run \(runID)", log: .success)
     }
 
     private func cleanBacktestDataFromTerminal(_ arguments: ArraySlice<String>) async throws {

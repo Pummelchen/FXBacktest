@@ -56,10 +56,10 @@ public struct FXStupid: FXBacktestPluginV1 {
 
         for index in 0..<marketUniverse.count {
             if runtime.hardStopped { break }
-            runtime.onTick(index: index)
+            try runtime.onTick(index: index)
         }
 
-        runtime.finish()
+        try runtime.finish()
         return runtime.result()
     }
 }
@@ -102,11 +102,7 @@ private struct FXStupidRuntime {
         self.inputs = FXStupidInputs(config: config, parameters: parameters)
         self.globalStartLotSize = inputs.lotSize
         self.newLot = inputs.lotSize
-        self.broker = FXStupidBroker(
-            initialDeposit: context.settings.initialDeposit,
-            contractSize: context.settings.contractSize,
-            priceScale: context.priceScale
-        )
+        self.broker = FXStupidBroker(context: context)
         if config.signalTimeframe != "PERIOD_M1" {
             self.flags |= FXStupidResultFlag.unsupportedTimeframe.rawValue
         }
@@ -118,21 +114,21 @@ private struct FXStupidRuntime {
         newMaxEquity = startEquity
     }
 
-    mutating func onTick(index: Int) {
+    mutating func onTick(index: Int) throws {
         barsProcessed = index + 1
         for symbol in marketUniverse.symbols {
             if let close = marketUniverse[symbol]?.close[index] {
-                broker.markToMarket(symbol: symbol, price: close, priceScale: priceScale(for: symbol))
+                try broker.markToMarket(symbol: symbol, price: close, digits: digits(for: symbol))
             }
         }
 
         eaStop()
         if hardStopped { return }
-        tpCheck()
-        slCheck()
+        try tpCheck()
+        try slCheck()
         adjustLotSizes()
         refreshTraded()
-        orderScan(index: index)
+        try orderScan(index: index)
     }
 
     mutating func eaStop() {
@@ -147,29 +143,29 @@ private struct FXStupidRuntime {
         }
     }
 
-    mutating func tpCheck() {
+    mutating func tpCheck() throws {
         if ordersTotal() + positionsTotal() > 0 {
             if inputs.trailStop == 1 {
-                trailingStop()
+                try trailingStop()
             }
 
             if inputs.trailStop == 0 {
                 if (broker.equity - newMaxEquity) > inputs.eaEquiTP {
-                    closeAll()
+                    try closeAll()
                 }
             }
         }
     }
 
-    mutating func slCheck() {
+    mutating func slCheck() throws {
         if inputs.eaEquiSL > 0 && ordersTotal() + positionsTotal() > 0 {
             if (newMaxEquity - broker.equity) > inputs.eaEquiSL {
-                closeAll()
+                try closeAll()
             }
         }
     }
 
-    mutating func trailingStop() {
+    mutating func trailingStop() throws {
         let p = broker.equity - newMaxEquity
 
         if trailTemp == 0 && p > (inputs.eaEquiTP + inputs.trailStepUp) {
@@ -181,11 +177,11 @@ private struct FXStupidRuntime {
         }
 
         if trailTemp > 0 && p < inputs.eaEquiTP {
-            closeAll()
+            try closeAll()
         }
 
         if trailTemp > 0 && p < (trailTemp - inputs.trailStepDown) {
-            closeAll()
+            try closeAll()
         }
     }
 
@@ -194,17 +190,17 @@ private struct FXStupidRuntime {
         hardStopped = true
     }
 
-    mutating func placeInitialOrder(orderType: Int, symbol: String, price: Int64) {
+    mutating func placeInitialOrder(orderType: Int, symbol: String, price: Int64) throws {
         if orderType == 1 {
-            _ = broker.buy(symbol: symbol, lots: normalizeLot(newLot), price: price, priceScale: priceScale(for: symbol))
+            _ = try broker.buy(symbol: symbol, lots: normalizeLot(newLot), price: price, digits: digits(for: symbol))
         }
         if orderType == 2 {
-            _ = broker.sell(symbol: symbol, lots: normalizeLot(newLot), price: price, priceScale: priceScale(for: symbol))
+            _ = try broker.sell(symbol: symbol, lots: normalizeLot(newLot), price: price, digits: digits(for: symbol))
         }
     }
 
-    mutating func closeAll() {
-        broker.closeAll()
+    mutating func closeAll() throws {
+        try broker.closeAll(digitsBySymbol: marketUniverse.digitsBySymbol())
         newMaxEquity = broker.equity
         if inputs.trailStop == 1 {
             trailTemp = 0
@@ -252,7 +248,7 @@ private struct FXStupidRuntime {
         return 0
     }
 
-    mutating func orderScan(index: Int) {
+    mutating func orderScan(index: Int) throws {
         var total = ordersTotal() + positionsTotal()
         if total >= inputs.maxOrders { return }
 
@@ -281,9 +277,9 @@ private struct FXStupidRuntime {
             }
 
             if up {
-                ok = broker.buy(symbol: sx, lots: newLot, price: price, priceScale: priceScale(for: sx))
+                ok = try broker.buy(symbol: sx, lots: newLot, price: price, digits: digits(for: sx))
             } else if down {
-                ok = broker.sell(symbol: sx, lots: newLot, price: price, priceScale: priceScale(for: sx))
+                ok = try broker.sell(symbol: sx, lots: newLot, price: price, digits: digits(for: sx))
             }
 
             if ok {
@@ -311,14 +307,14 @@ private struct FXStupidRuntime {
         }
     }
 
-    mutating func finish() {
+    mutating func finish() throws {
         for symbol in marketUniverse.symbols {
             if let finalClose = marketUniverse[symbol]?.close.last {
-                broker.markToMarket(symbol: symbol, price: finalClose, priceScale: priceScale(for: symbol))
+                try broker.markToMarket(symbol: symbol, price: finalClose, digits: digits(for: symbol))
             }
         }
         if !hardStopped {
-            closeAll()
+            try closeAll()
         }
     }
 
@@ -365,16 +361,14 @@ private struct FXStupidRuntime {
         (value * 100).rounded() / 100
     }
 
-    func priceScale(for symbol: String) -> Double {
-        guard let series = marketUniverse[symbol] else { return context.priceScale }
-        return pow(10.0, Double(series.metadata.digits))
+    func digits(for symbol: String) -> Int {
+        marketUniverse[symbol]?.metadata.digits ?? context.digits
     }
 }
 
 private struct FXStupidBroker {
+    let context: BacktestContext
     let initialDeposit: Double
-    let contractSize: Double
-    let priceScale: Double
     private(set) var balance: Double
     private(set) var equity: Double
     private(set) var equityPeak: Double
@@ -385,48 +379,63 @@ private struct FXStupidBroker {
     private(set) var winningTrades: Int = 0
     private(set) var losingTrades: Int = 0
     private(set) var positions: [FXStupidPosition] = []
-    private var currentPrices: [String: (price: Int64, priceScale: Double)] = [:]
+    private var currentPrices: [String: Int64] = [:]
 
-    init(initialDeposit: Double, contractSize: Double, priceScale: Double) {
-        self.initialDeposit = initialDeposit
-        self.contractSize = contractSize
-        self.priceScale = priceScale
-        self.balance = initialDeposit
-        self.equity = initialDeposit
-        self.equityPeak = initialDeposit
+    init(context: BacktestContext) {
+        self.context = context
+        self.initialDeposit = context.settings.initialDeposit
+        self.balance = context.settings.initialDeposit
+        self.equity = context.settings.initialDeposit
+        self.equityPeak = context.settings.initialDeposit
         self.maxDrawdown = 0
     }
 
-    mutating func buy(symbol: String, lots: Double, price: Int64, priceScale: Double) -> Bool {
-        open(symbol: symbol, direction: .buy, lots: lots, price: price, priceScale: priceScale)
+    mutating func buy(symbol: String, lots: Double, price: Int64, digits: Int) throws -> Bool {
+        try open(symbol: symbol, direction: .buy, lots: lots, price: price, digits: digits)
     }
 
-    mutating func sell(symbol: String, lots: Double, price: Int64, priceScale: Double) -> Bool {
-        open(symbol: symbol, direction: .sell, lots: lots, price: price, priceScale: priceScale)
+    mutating func sell(symbol: String, lots: Double, price: Int64, digits: Int) throws -> Bool {
+        try open(symbol: symbol, direction: .sell, lots: lots, price: price, digits: digits)
     }
 
-    mutating func open(symbol: String, direction: FXStupidDirection, lots: Double, price: Int64, priceScale: Double) -> Bool {
+    mutating func open(symbol: String, direction: FXStupidDirection, lots: Double, price: Int64, digits: Int) throws -> Bool {
         let normalizedSymbol = symbol.uppercased()
         guard lots > 0, !positions.contains(where: { $0.symbol == normalizedSymbol }) else {
             return false
         }
-        positions.append(FXStupidPosition(symbol: normalizedSymbol, direction: direction, entryPrice: price, lots: lots, priceScale: priceScale))
-        markToMarket(symbol: normalizedSymbol, price: price, priceScale: priceScale)
+        let spec = try context.executionSpec(for: normalizedSymbol, fallbackDigits: digits)
+        let normalizedLots = spec.normalizedLot(lots)
+        guard normalizedLots > 0 else { return false }
+        let side = direction.orderSide
+        let entryPrice = spec.executablePrice(side: side, action: .open, midPrice: price)
+        let openCommission = normalizedLots * spec.commissionPerLotPerSide
+        balance -= openCommission
+        positions.append(FXStupidPosition(
+            symbol: normalizedSymbol,
+            direction: direction,
+            entryPrice: entryPrice,
+            lots: normalizedLots,
+            digits: digits,
+            openCommission: openCommission
+        ))
+        try markToMarket(symbol: normalizedSymbol, price: price, digits: digits)
         return true
     }
 
-    mutating func closeAll() {
+    mutating func closeAll(digitsBySymbol: [String: Int]) throws {
         for position in positions {
-            let price = currentPrices[position.symbol]?.price ?? position.entryPrice
-            close(position: position, price: price)
+            let price = currentPrices[position.symbol] ?? position.entryPrice
+            try close(position: position, price: price, digits: digitsBySymbol[position.symbol])
         }
         positions.removeAll(keepingCapacity: true)
-        recomputeEquity()
+        try recomputeEquity()
     }
 
-    mutating func markToMarket(symbol: String, price: Int64, priceScale: Double) {
-        currentPrices[symbol.uppercased()] = (price, priceScale)
-        recomputeEquity()
+    mutating func markToMarket(symbol: String, price: Int64, digits: Int) throws {
+        let normalizedSymbol = symbol.uppercased()
+        _ = try context.executionSpec(for: normalizedSymbol, fallbackDigits: digits)
+        currentPrices[normalizedSymbol] = price
+        try recomputeEquity()
     }
 
     var netProfit: Double {
@@ -441,34 +450,42 @@ private struct FXStupidBroker {
         grossLoss == 0 ? (grossProfit > 0 ? Double.infinity : 0) : grossProfit / abs(grossLoss)
     }
 
-    private mutating func close(position: FXStupidPosition, price: Int64) {
-        let pnl = profit(position: position, price: price)
-        balance += pnl
-        grossProfit += max(0, pnl)
-        grossLoss += min(0, pnl)
+    private mutating func close(position: FXStupidPosition, price: Int64, digits: Int?) throws {
+        let spec = try context.executionSpec(for: position.symbol, fallbackDigits: digits ?? position.digits)
+        let exitPrice = spec.executablePrice(side: position.direction.orderSide, action: .close, midPrice: price)
+        let gross = profit(position: position, price: exitPrice, spec: spec)
+        let closeCommission = position.lots * spec.commissionPerLotPerSide
+        let swap = position.direction == .buy ? position.lots * spec.swapLongPerLot : position.lots * spec.swapShortPerLot
+        let balanceDelta = gross - closeCommission + swap
+        let realized = balanceDelta - position.openCommission
+        balance += balanceDelta
+        grossProfit += max(0, gross)
+        grossLoss += min(0, gross)
         totalTrades += 1
-        if pnl >= 0 {
+        if realized >= 0 {
             winningTrades += 1
         } else {
             losingTrades += 1
         }
     }
 
-    private mutating func recomputeEquity() {
+    private mutating func recomputeEquity() throws {
         var floating = 0.0
         for position in positions {
-            let price = currentPrices[position.symbol]?.price ?? position.entryPrice
-            floating += profit(position: position, price: price)
+            let spec = try context.executionSpec(for: position.symbol, fallbackDigits: position.digits)
+            let price = currentPrices[position.symbol] ?? position.entryPrice
+            let exitPrice = spec.executablePrice(side: position.direction.orderSide, action: .close, midPrice: price)
+            floating += profit(position: position, price: exitPrice, spec: spec)
         }
         equity = balance + floating
         equityPeak = max(equityPeak, equity)
         maxDrawdown = max(maxDrawdown, equityPeak - equity)
     }
 
-    private func profit(position: FXStupidPosition, price: Int64) -> Double {
+    private func profit(position: FXStupidPosition, price: Int64, spec: FXBacktestSymbolExecutionSpec) -> Double {
         let direction = Double(position.direction.rawValue)
-        let priceDelta = Double(price - position.entryPrice) / position.priceScale
-        return direction * priceDelta * contractSize * position.lots
+        let priceDelta = Double(price - position.entryPrice) / spec.priceScale
+        return direction * priceDelta * spec.contractSize * position.lots
     }
 }
 
@@ -477,12 +494,22 @@ private struct FXStupidPosition: Sendable, Hashable {
     let direction: FXStupidDirection
     let entryPrice: Int64
     let lots: Double
-    let priceScale: Double
+    let digits: Int
+    let openCommission: Double
 }
 
 private enum FXStupidDirection: Int, Sendable {
     case buy = 1
     case sell = -1
+
+    var orderSide: FXBacktestOrderSide {
+        switch self {
+        case .buy:
+            return .buy
+        case .sell:
+            return .sell
+        }
+    }
 }
 
 private struct FXStupidInputs {

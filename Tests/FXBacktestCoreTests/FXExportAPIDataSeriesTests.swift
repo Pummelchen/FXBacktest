@@ -49,6 +49,34 @@ final class FXExportAPIDataSeriesTests: XCTestCase {
         ))
     }
 
+    func testOhlcDataSeriesRejectsNonMinuteTimestampAndNonPositivePrices() throws {
+        XCTAssertThrowsError(try OhlcDataSeries(
+            metadata: FXBacktestMarketMetadata(
+                brokerSourceId: "demo",
+                logicalSymbol: "EURUSD",
+                digits: 5
+            ),
+            utcTimestamps: [1_704_067_201],
+            open: [108_000],
+            high: [108_010],
+            low: [107_990],
+            close: [108_005]
+        ))
+
+        XCTAssertThrowsError(try OhlcDataSeries(
+            metadata: FXBacktestMarketMetadata(
+                brokerSourceId: "demo",
+                logicalSymbol: "EURUSD",
+                digits: 5
+            ),
+            utcTimestamps: [1_704_067_200],
+            open: [0],
+            high: [108_010],
+            low: [107_990],
+            close: [108_005]
+        ))
+    }
+
     func testExecutionProfileBuildsFromFXExportExecutionSpecResponse() throws {
         let response = FXBacktestExecutionSpecResponse(
             brokerSourceId: "demo",

@@ -53,6 +53,33 @@ final class FXStupidPluginTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(result.totalTrades, 2)
     }
 
+    func testFXStupidAppliesExecutionProfileCosts() throws {
+        let plugin = FXStupid()
+        let market = try monotonicMarket(symbol: "EURUSD")
+        let sweep = try ParameterSweep.singlePass(definitions: plugin.parameterDefinitions)
+        let parameters = try sweep.parameterVector(at: 0)
+        let zeroCostContext = BacktestContext(settings: BacktestRunSettings(), digits: market.metadata.digits)
+
+        let costlySpec = try FXBacktestSymbolExecutionSpec(
+            logicalSymbol: "EURUSD",
+            mt5Symbol: "EURUSD",
+            digits: 5,
+            contractSize: 100_000,
+            spreadPoints: 20,
+            commissionPerLotPerSide: 1,
+            commissionSource: "test",
+            slippageSource: "test"
+        )
+        let costlyProfile = try FXBacktestExecutionProfile(symbols: ["EURUSD": costlySpec])
+        let costlySettings = BacktestRunSettings(executionProfile: costlyProfile)
+        let costlyContext = BacktestContext(settings: costlySettings, digits: market.metadata.digits)
+
+        let zeroCostResult = try plugin.runPass(market: market, parameters: parameters, context: zeroCostContext)
+        let costlyResult = try plugin.runPass(market: market, parameters: parameters, context: costlyContext)
+
+        XCTAssertLessThan(costlyResult.netProfit, zeroCostResult.netProfit)
+    }
+
     private func monotonicMarket(symbol: String, digits: Int = 5) throws -> OhlcDataSeries {
         let count = 80
         let start = Int64(1_704_067_200)

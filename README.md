@@ -17,7 +17,7 @@ The goal is similar to the MT5 Strategy Tester optimization view: define a matri
 - Read-only FXExport data loading through the dedicated FXBacktest API v1.
 - Pre-run MT5 execution snapshot through FXExport API v1 for bid/ask, spread, swap, margin, lot limits, and account leverage.
 - ClickHouse-backed FXBacktest result-store API for optimization results only, including explicit purge commands.
-- Live pass table with profit, drawdown, trades, win rate, profit factor, and parameters.
+- Live pass table with MT5-style result, profit, trade count, drawdown, recovery, Sharpe placeholder, and tested input columns.
 - Resident terminal command shell with `>` prompt for loading data, changing settings, starting runs, stopping active work, and checking status without relaunching.
 - Demo data mode for UI and engine testing when the FXExport API is not running.
 
@@ -203,7 +203,7 @@ If FXExport reports missing verified coverage, bad hashes, mixed digits, duplica
 
 FXBacktest is intended to stay open. If no backtest is active, it waits at the `>` prompt for the next command. State-changing commands gracefully stop active data loads or optimization runs before changing the app state.
 
-The `--api-url`, `--workers`, `--input`, and similar `--...` tokens below are command options typed inside the running app. They are not launch-time parameters.
+The `--api-url`, `--workers`, `--input`, and similar `--...` tokens below are command options typed inside the running app. They are not launch-time parameters. Options may be entered as `--key value` or `--key=value`.
 
 Useful commands:
 
@@ -229,7 +229,7 @@ help
 exit
 ```
 
-`set --persist-results true` streams future optimization rows into ClickHouse through `BacktestResultStore`. `save-results` persists the currently retained in-memory result rows. `clean-backtest-data` is the purge command for old or unwanted optimization result data.
+`set --persist-results true` streams future optimization rows into ClickHouse through `BacktestResultStore`. `save-results` persists a point-in-time snapshot of the currently retained in-memory result rows. `clean-backtest-data` is the purge command for old or unwanted optimization result data.
 
 ## FXExport Data Contract
 
@@ -296,7 +296,7 @@ That result-store API is separate from FXExport history storage and must not be 
 
 For FXExport-backed runs, the v2 execution profile is pulled from MT5 immediately before the run starts. The account model is always `hedging`. MT5 does not expose a reliable static symbol commission or tester slippage model through `SymbolInfo*`, so the API carries explicit source fields: commission currently defaults to `0` with source `not_exposed_by_mt5_symbol_info`, and slippage defaults to deterministic zero with source `deterministic_zero_default`. Those source fields are part of the model so broker-specific commission or slippage can later be added without hiding assumptions.
 
-The older `BacktestBroker` remains available for simple plugins. New or upgraded plugins should use the v2 execution types when fidelity matters.
+The older `BacktestBroker` remains available for simple plugins. New or upgraded plugins should use the v2 execution types when fidelity matters. FXStupid uses its plugin-local broker to preserve the converted EA flow, but that broker now consumes `BacktestContext.executionProfile` for spread, slippage, commission, swap, contract size, digits, and lot normalization.
 
 ## Multi-Symbol Backtests
 
@@ -389,7 +389,7 @@ OnInit -> OnTick -> EAStop -> TPCheck -> SLCheck -> AdjustLotSizes -> RefreshTra
 
 The original MQL5 `input` values are stored in `FXStupid.config.json` beside the plugin file and become FXBacktest parameter definitions. The plugin is CPU-only for now because preserving the EA control flow is more important than immediately rewriting it as a Metal kernel.
 
-FXStupid now uses `OhlcMarketUniverse`, so loaded symbols from `FXPairs` can participate in the original scan loop. Symbols not loaded from FXExport behave like unavailable MT5 symbols and are skipped.
+FXStupid now uses `OhlcMarketUniverse`, so loaded symbols from `FXPairs` can participate in the original scan loop. Symbols not loaded from FXExport behave like unavailable MT5 symbols and are skipped. Its pass-local broker applies the same pre-run MT5 execution profile that FXBacktest pulls from FXExport API v1 before every non-demo run.
 
 ## Plugin Acceleration API
 

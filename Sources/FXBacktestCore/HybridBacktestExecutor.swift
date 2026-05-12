@@ -20,7 +20,11 @@ public struct HybridBacktestExecutor: Sendable {
                     let total = sweep.combinationCount
                     let start = ContinuousClock.now
                     let allocator = HybridBacktestWorkAllocator(totalPasses: total)
-                    let progress = HybridBacktestProgress(totalPasses: total)
+                    let emitter = HybridBacktestResultEmitter(
+                        totalPasses: total,
+                        start: start,
+                        continuation: continuation
+                    )
                     let cpuSettings = settings.retargeted(.cpu)
                     let metalSettings = settings.retargeted(.metal)
                     let runner = try MetalKernelRunner(kernel: kernel, market: marketUniverse.primary)
@@ -40,13 +44,6 @@ public struct HybridBacktestExecutor: Sendable {
 
                     continuation.yield(.started(totalPasses: total))
 
-                    func emit(_ results: [BacktestPassResult]) async {
-                        for result in results {
-                            let latest = await progress.recordPass(start: start)
-                            continuation.yield(.passCompleted(result, latest))
-                        }
-                    }
-
                     func runMetalRange(_ range: Range<UInt64>) async throws {
                         let results = try runner.runChunk(
                             range,
@@ -54,7 +51,7 @@ public struct HybridBacktestExecutor: Sendable {
                             sweep: sweep,
                             settings: metalSettings
                         )
-                        await emit(results)
+                        await emitter.emit(results)
                     }
 
                     func runCPURange(_ range: Range<UInt64>) async throws {
@@ -65,7 +62,7 @@ public struct HybridBacktestExecutor: Sendable {
                             sweep: sweep,
                             settings: cpuSettings
                         )
-                        await emit(results)
+                        await emitter.emit(results)
                     }
 
                     try await withThrowingTaskGroup(of: Void.self) { group in
@@ -98,7 +95,7 @@ public struct HybridBacktestExecutor: Sendable {
                         try await group.waitForAll()
                     }
 
-                    let finalProgress = await progress.snapshot(start: start)
+                    let finalProgress = await emitter.snapshot()
                     continuation.yield(.completed(finalProgress))
                     continuation.finish()
                     #else
@@ -133,20 +130,30 @@ private actor HybridBacktestWorkAllocator {
     }
 }
 
-private actor HybridBacktestProgress {
+private actor HybridBacktestResultEmitter {
     private var completedPasses: UInt64 = 0
     private let totalPasses: UInt64
+    private let start: ContinuousClock.Instant
+    private let continuation: AsyncThrowingStream<BacktestOptimizationEvent, Error>.Continuation
 
-    init(totalPasses: UInt64) {
+    init(
+        totalPasses: UInt64,
+        start: ContinuousClock.Instant,
+        continuation: AsyncThrowingStream<BacktestOptimizationEvent, Error>.Continuation
+    ) {
         self.totalPasses = totalPasses
+        self.start = start
+        self.continuation = continuation
     }
 
-    func recordPass(start: ContinuousClock.Instant) -> BacktestProgress {
-        completedPasses += 1
-        return snapshot(start: start)
+    func emit(_ results: [BacktestPassResult]) {
+        for result in results {
+            completedPasses += 1
+            continuation.yield(.passCompleted(result, snapshot()))
+        }
     }
 
-    func snapshot(start: ContinuousClock.Instant) -> BacktestProgress {
+    func snapshot() -> BacktestProgress {
         let elapsed = start.duration(to: ContinuousClock.now)
         return BacktestProgress(
             completedPasses: completedPasses,
