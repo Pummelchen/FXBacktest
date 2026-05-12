@@ -19,7 +19,7 @@ struct FXBacktestApp: App {
                     model.runOptimization()
                 }
                 .keyboardShortcut("r", modifiers: [.command])
-                .disabled(model.isRunning)
+                .disabled(model.isRunning || model.isLoadingData)
 
                 Button("Cancel Run") {
                     model.cancelRun()

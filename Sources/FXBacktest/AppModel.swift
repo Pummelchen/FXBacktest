@@ -146,12 +146,15 @@ final class AppModel: ObservableObject, @unchecked Sendable {
             updateStatus("Stop active optimization before loading FXExport data", log: .warning)
             return
         }
-        guard let url = URL(string: apiURLText) else {
-            updateStatus("Invalid FXExport API URL", log: .error)
-            return
-        }
         do {
             try validateCurrentDataRequest()
+        } catch {
+            updateStatus(String(describing: error), log: .error)
+            return
+        }
+        let url: URL
+        do {
+            url = try Self.validatedHTTPURL(apiURLText, fieldName: "FXExport API URL")
         } catch {
             updateStatus(String(describing: error), log: .error)
             return
@@ -282,8 +285,20 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         let configuredContractSize = contractSize
         let configuredLotSize = lotSize
         let configuredBrokerSourceId = brokerSourceId
+        let isDemoUniverse = marketUniverse.seriesBySymbol.values.allSatisfy { $0.metadata.brokerSourceId == "demo" }
+        let executionAPIURL: URL
+        if isDemoUniverse {
+            executionAPIURL = (try? Self.validatedHTTPURL(apiURLText, fieldName: "FXExport API URL")) ?? FXExportConnectionSettings().apiBaseURL
+        } else {
+            do {
+                executionAPIURL = try Self.validatedHTTPURL(apiURLText, fieldName: "FXExport API URL")
+            } catch {
+                updateStatus(String(describing: error), log: .error)
+                return
+            }
+        }
         let executionConnection = FXExportConnectionSettings(
-            apiBaseURL: URL(string: apiURLText) ?? FXExportConnectionSettings().apiBaseURL,
+            apiBaseURL: executionAPIURL,
             requestTimeoutSeconds: 60
         )
 
@@ -499,6 +514,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     }
 
     private func validateCurrentDataRequest() throws {
+        _ = try Self.validatedHTTPURL(apiURLText, fieldName: "FXExport API URL")
         guard !brokerSourceId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw FXBacktestError.invalidParameter("Broker source id must not be empty.")
         }
@@ -605,6 +621,15 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         )
         try config.validate()
         return config
+    }
+
+    private static func validatedHTTPURL(_ text: String, fieldName: String) throws -> URL {
+        guard let url = URL(string: text),
+              ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+              url.host != nil else {
+            throw FXBacktestError.invalidParameter("\(fieldName) must be an absolute http or https URL.")
+        }
+        return url
     }
 
     private func startPersistenceIfEnabled(
@@ -792,6 +817,9 @@ extension AppModel {
         }
         if parsed.positionals.count > 1 {
             throw TerminalCommandError.invalidValue("run accepts at most one positional target: cpu, gpu/metal, or both.")
+        }
+        if let requestedTarget {
+            try validateTargetSelection(requestedTarget)
         }
         try validateConfigurationOptions(parsed.options, allowedGroup: .run)
         await stopActiveWorkAndWait(reason: "start optimization")
@@ -994,8 +1022,8 @@ extension AppModel {
         let canonical = try canonicalAllowedConfigurationKey(key, allowedGroup: allowedGroup)
         switch canonical {
         case "api-url":
-            guard URL(string: value) != nil else {
-                throw TerminalCommandError.invalidValue("api-url must be a valid URL.")
+            guard Self.isValidAbsoluteHTTPURL(value) else {
+                throw TerminalCommandError.invalidValue("api-url must be an absolute http or https URL.")
             }
         case "broker", "symbol", "symbols", "mt5-symbol", "clickhouse-db", "clickhouse-user", "clickhouse-password":
             guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -1014,7 +1042,7 @@ extension AppModel {
         case "max-rows", "workers", "chunk":
             _ = try parseInt(value, name: key, minimum: 1)
         case "target":
-            _ = try parseTarget(value)
+            try validateTargetSelection(try parseTarget(value))
         case "initial-deposit", "contract-size", "lot":
             let parsed = try parseDouble(value, name: key, minimum: 0)
             guard parsed > 0 else {
@@ -1054,7 +1082,9 @@ extension AppModel {
         case "max-rows":
             maximumRows = try parseInt(value, name: key, minimum: 1)
         case "target":
-            executionTarget = try parseTarget(value)
+            let target = try parseTarget(value)
+            try validateTargetSelection(target)
+            executionTarget = target
         case "workers":
             maxWorkers = try parseInt(value, name: key, minimum: 1)
         case "chunk":
@@ -1161,6 +1191,21 @@ extension AppModel {
         default:
             throw TerminalCommandError.invalidValue("target must be cpu, gpu/metal, or both.")
         }
+    }
+
+    private func validateTargetSelection(_ target: BacktestExecutionTarget) throws {
+        if target.requiresMetalKernel, selectedPlugin.metalKernel == nil {
+            throw TerminalCommandError.invalidValue("\(selectedPlugin.descriptor.displayName) has no Metal execution path; choose cpu.")
+        }
+    }
+
+    private static func isValidAbsoluteHTTPURL(_ value: String) -> Bool {
+        guard let url = URL(string: value),
+              ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+              url.host != nil else {
+            return false
+        }
+        return true
     }
 
     private func parseInt(_ value: String, name: String, minimum: Int? = nil, range: ClosedRange<Int>? = nil) throws -> Int {

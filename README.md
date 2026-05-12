@@ -239,6 +239,7 @@ If FXExport reports missing verified coverage, bad hashes, mixed digits, duplica
 FXBacktest is intended to stay open. If no backtest is active, it waits at the `>` prompt for the next command. State-changing commands gracefully stop active data loads or optimization runs before changing the app state.
 
 The `--api-url`, `--workers`, `--input`, and similar `--...` tokens below are command options typed inside the running app. They are not launch-time parameters. Options may be entered as `--key value` or `--key=value`.
+FXExport and ClickHouse URLs must be absolute `http` or `https` URLs. CPU-only plugins reject `gpu`, `metal`, and `both` targets; select a Metal-capable plugin before choosing those paths.
 
 Useful commands:
 

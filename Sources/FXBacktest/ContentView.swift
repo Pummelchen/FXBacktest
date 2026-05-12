@@ -69,7 +69,7 @@ struct ContentView: View {
             } label: {
                 Label("Run", systemImage: "play.fill")
             }
-            .disabled(model.isRunning)
+            .disabled(model.isRunning || model.isLoadingData)
 
             Button {
                 model.cancelRun()
@@ -150,6 +150,7 @@ struct ContentView: View {
                 }
             }
         }
+        .disabled(model.isRunning || model.isLoadingData)
     }
 
     private var runPanel: some View {
