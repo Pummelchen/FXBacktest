@@ -70,9 +70,40 @@ The Swift package dependency is local:
 .package(path: "../FXExport/MT5Research")
 ```
 
+## Current Release
+
+The current compiled GitHub release is [FXBacktest v0.1.0](https://github.com/Pummelchen/FXBacktest/releases/tag/v0.1.0).
+
+The macOS arm64 archive contains:
+
+- `FXBacktest`: the release executable.
+- `FXBacktest_FXBacktestPlugins.bundle`: required bundled plugin resources, including `FXStupid.config.json`.
+- `README.md`.
+
+Keep the executable and bundle in the same folder. To run the compiled release from Terminal:
+
+```bash
+curl -L -o FXBacktest-v0.1.0-macos-arm64.zip https://github.com/Pummelchen/FXBacktest/releases/download/v0.1.0/FXBacktest-v0.1.0-macos-arm64.zip
+unzip FXBacktest-v0.1.0-macos-arm64.zip
+cd FXBacktest-v0.1.0-macos-arm64
+./FXBacktest
+```
+
+Do not pass launch-time options to the compiled release either; configure FXBacktest from the resident `>` prompt after startup.
+
+If macOS quarantines the downloaded archive, clear quarantine on the extracted folder:
+
+```bash
+xattr -dr com.apple.quarantine FXBacktest-v0.1.0-macos-arm64
+```
+
 ## Quickstart
 
-### 1. Clone FXBacktest
+### 1. Choose Release Or Source Build
+
+Use the compiled release above when you only want to run FXBacktest. Use the source build path below when you want to develop, test, or build from the latest `main` branch.
+
+### 2. Clone FXBacktest For Source Builds
 
 ```bash
 git clone https://github.com/Pummelchen/FXBacktest.git
@@ -87,7 +118,7 @@ git clone https://github.com/Pummelchen/FXExport.git
 cd FXBacktest
 ```
 
-### 2. Build And Test
+### 3. Build And Test
 
 ```bash
 swift test
@@ -96,7 +127,7 @@ swift build -c release
 
 Release builds are the relevant performance baseline because SwiftPM uses whole-module optimization in release mode.
 
-### 3. Run The App
+### 4. Run The App From Source
 
 ```bash
 swift run FXBacktest
@@ -121,7 +152,7 @@ The first screen is the working backtester, not a setup wizard. It includes:
 - Run/Stop buttons.
 - Live MT5-style optimization table.
 
-### 4. Run A Demo Backtest
+### 5. Run A Demo Backtest
 
 Use this when the FXExport API is not running.
 
@@ -141,7 +172,7 @@ The same flow from the terminal prompt is:
 
 The pass table updates live and sorts the best results by net profit.
 
-### 5. Run A Backtest With FXExport Data
+### 6. Run A Backtest With FXExport Data
 
 FXExport is responsible for historical data ingestion, broker UTC mapping, verification, repair, and internal storage. FXBacktest only reads verified data through FXExport's dedicated FXBacktest API v1. FXBacktest must not connect to ClickHouse directly.
 
