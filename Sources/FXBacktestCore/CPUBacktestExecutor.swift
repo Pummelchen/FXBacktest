@@ -9,6 +9,15 @@ public struct CPUBacktestExecutor: Sendable {
         sweep: ParameterSweep,
         settings: BacktestRunSettings
     ) -> AsyncThrowingStream<BacktestOptimizationEvent, Error> {
+        run(plugin: plugin, marketUniverse: market.universe, sweep: sweep, settings: settings)
+    }
+
+    public func run(
+        plugin: AnyFXBacktestPlugin,
+        marketUniverse: OhlcMarketUniverse,
+        sweep: ParameterSweep,
+        settings: BacktestRunSettings
+    ) -> AsyncThrowingStream<BacktestOptimizationEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task.detached(priority: .userInitiated) {
                 let start = ContinuousClock.now
@@ -31,7 +40,7 @@ public struct CPUBacktestExecutor: Sendable {
                                 try Self.computeChunk(
                                     lower..<upper,
                                     plugin: plugin,
-                                    market: market,
+                                    marketUniverse: marketUniverse,
                                     sweep: sweep,
                                     settings: settings
                                 )
@@ -78,10 +87,11 @@ public struct CPUBacktestExecutor: Sendable {
     private static func computeChunk(
         _ range: Range<UInt64>,
         plugin: AnyFXBacktestPlugin,
-        market: OhlcDataSeries,
+        marketUniverse: OhlcMarketUniverse,
         sweep: ParameterSweep,
         settings: BacktestRunSettings
     ) throws -> [BacktestPassResult] {
+        let market = marketUniverse.primary
         let context = BacktestContext(settings: settings, digits: market.metadata.digits)
         var results: [BacktestPassResult] = []
         results.reserveCapacity(Int(range.upperBound - range.lowerBound))
@@ -91,7 +101,7 @@ public struct CPUBacktestExecutor: Sendable {
             let vector = try sweep.parameterVector(at: combinationIndex)
             do {
                 let result = try plugin
-                    .runPass(market: market, parameters: vector, context: context)
+                    .runPass(marketUniverse: marketUniverse, parameters: vector, context: context)
                     .withEngine(.cpu)
                 results.append(result)
             } catch {

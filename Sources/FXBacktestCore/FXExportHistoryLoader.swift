@@ -17,8 +17,8 @@ public struct FXExportConnectionSettings: Codable, Hashable, Sendable {
 public struct FXExportHistoryRequest: Codable, Hashable, Sendable {
     public var brokerSourceId: String
     public var logicalSymbol: String
-    public var expectedMT5Symbol: String
-    public var expectedDigits: Int
+    public var expectedMT5Symbol: String?
+    public var expectedDigits: Int?
     public var utcStartInclusive: Int64
     public var utcEndExclusive: Int64
     public var maximumRows: Int
@@ -26,8 +26,8 @@ public struct FXExportHistoryRequest: Codable, Hashable, Sendable {
     public init(
         brokerSourceId: String = "icmarkets-sc-mt5-4",
         logicalSymbol: String = "EURUSD",
-        expectedMT5Symbol: String = "EURUSD",
-        expectedDigits: Int = 5,
+        expectedMT5Symbol: String? = "EURUSD",
+        expectedDigits: Int? = 5,
         utcStartInclusive: Int64 = 1_704_067_200,
         utcEndExclusive: Int64 = 1_707_177_600,
         maximumRows: Int = 5_000_000
@@ -55,7 +55,7 @@ public struct FXExportHistoryLoader: Sendable {
                 logicalSymbol: request.logicalSymbol,
                 utcStartInclusive: request.utcStartInclusive,
                 utcEndExclusive: request.utcEndExclusive,
-                expectedMT5Symbol: request.expectedMT5Symbol.isEmpty ? nil : request.expectedMT5Symbol,
+                expectedMT5Symbol: request.expectedMT5Symbol?.isEmpty == true ? nil : request.expectedMT5Symbol,
                 expectedDigits: request.expectedDigits,
                 maximumRows: request.maximumRows
             )
@@ -68,5 +68,29 @@ public struct FXExportHistoryLoader: Sendable {
         } catch {
             throw FXBacktestError.dataLoadFailed(String(describing: error))
         }
+    }
+
+    public func loadUniverse(
+        connection: FXExportConnectionSettings,
+        requests: [FXExportHistoryRequest],
+        primarySymbol: String
+    ) async throws -> OhlcMarketUniverse {
+        guard !requests.isEmpty else {
+            throw FXBacktestError.invalidParameter("At least one FXExport history request is required.")
+        }
+
+        var loaded: [OhlcDataSeries] = []
+        loaded.reserveCapacity(requests.count)
+        try await withThrowingTaskGroup(of: OhlcDataSeries.self) { group in
+            for request in requests {
+                group.addTask {
+                    try await self.load(connection: connection, request: request)
+                }
+            }
+            for try await series in group {
+                loaded.append(series)
+            }
+        }
+        return try OhlcMarketUniverse(primarySymbol: primarySymbol, series: loaded, requireAlignedTimestamps: true)
     }
 }

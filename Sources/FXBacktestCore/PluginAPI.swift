@@ -51,9 +51,16 @@ public protocol FXBacktestPluginV1: Sendable {
     var descriptor: FXBacktestPluginDescriptor { get }
     var parameterDefinitions: [ParameterDefinition] { get }
     var metalKernel: MetalKernelV1? { get }
+    var accelerationDescriptor: PluginAccelerationDescriptor { get }
 
     func runPass(
         market: OhlcDataSeries,
+        parameters: ParameterVector,
+        context: BacktestContext
+    ) throws -> BacktestPassResult
+
+    func runPass(
+        marketUniverse: OhlcMarketUniverse,
         parameters: ParameterVector,
         context: BacktestContext
     ) throws -> BacktestPassResult
@@ -61,6 +68,18 @@ public protocol FXBacktestPluginV1: Sendable {
 
 public extension FXBacktestPluginV1 {
     var metalKernel: MetalKernelV1? { nil }
+
+    var accelerationDescriptor: PluginAccelerationDescriptor {
+        PluginAccelerationDescriptor(pluginIdentifier: descriptor.id)
+    }
+
+    func runPass(
+        marketUniverse: OhlcMarketUniverse,
+        parameters: ParameterVector,
+        context: BacktestContext
+    ) throws -> BacktestPassResult {
+        try runPass(market: marketUniverse.primary, parameters: parameters, context: context)
+    }
 }
 
 public struct AnyFXBacktestPlugin: FXBacktestPluginV1, Identifiable {
@@ -68,15 +87,21 @@ public struct AnyFXBacktestPlugin: FXBacktestPluginV1, Identifiable {
     public let descriptor: FXBacktestPluginDescriptor
     public let parameterDefinitions: [ParameterDefinition]
     public let metalKernel: MetalKernelV1?
+    public let accelerationDescriptor: PluginAccelerationDescriptor
     private let runPassClosure: @Sendable (OhlcDataSeries, ParameterVector, BacktestContext) throws -> BacktestPassResult
+    private let runUniversePassClosure: @Sendable (OhlcMarketUniverse, ParameterVector, BacktestContext) throws -> BacktestPassResult
 
     public init<P: FXBacktestPluginV1>(_ plugin: P) {
         self.id = plugin.descriptor.id
         self.descriptor = plugin.descriptor
         self.parameterDefinitions = plugin.parameterDefinitions
         self.metalKernel = plugin.metalKernel
+        self.accelerationDescriptor = plugin.accelerationDescriptor
         self.runPassClosure = { market, parameters, context in
             try plugin.runPass(market: market, parameters: parameters, context: context)
+        }
+        self.runUniversePassClosure = { marketUniverse, parameters, context in
+            try plugin.runPass(marketUniverse: marketUniverse, parameters: parameters, context: context)
         }
     }
 
@@ -86,5 +111,13 @@ public struct AnyFXBacktestPlugin: FXBacktestPluginV1, Identifiable {
         context: BacktestContext
     ) throws -> BacktestPassResult {
         try runPassClosure(market, parameters, context)
+    }
+
+    public func runPass(
+        marketUniverse: OhlcMarketUniverse,
+        parameters: ParameterVector,
+        context: BacktestContext
+    ) throws -> BacktestPassResult {
+        try runUniversePassClosure(marketUniverse, parameters, context)
     }
 }

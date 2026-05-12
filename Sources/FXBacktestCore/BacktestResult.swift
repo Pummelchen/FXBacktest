@@ -14,6 +14,7 @@ public struct BacktestRunSettings: Codable, Hashable, Sendable {
     public var initialDeposit: Double
     public var contractSize: Double
     public var lotSize: Double
+    public var executionProfile: FXBacktestExecutionProfile
 
     public init(
         target: BacktestExecutionTarget = .cpu,
@@ -21,7 +22,8 @@ public struct BacktestRunSettings: Codable, Hashable, Sendable {
         chunkSize: Int = 128,
         initialDeposit: Double = 10_000,
         contractSize: Double = 100_000,
-        lotSize: Double = 0.10
+        lotSize: Double = 0.10,
+        executionProfile: FXBacktestExecutionProfile = .empty()
     ) {
         self.target = target
         self.maxWorkers = max(1, maxWorkers)
@@ -29,6 +31,7 @@ public struct BacktestRunSettings: Codable, Hashable, Sendable {
         self.initialDeposit = initialDeposit
         self.contractSize = contractSize
         self.lotSize = lotSize
+        self.executionProfile = executionProfile
     }
 }
 
@@ -41,6 +44,14 @@ public struct BacktestContext: Sendable {
         self.settings = settings
         self.digits = digits
         self.priceScale = pow(10.0, Double(digits))
+    }
+
+    public func executionSpec(for logicalSymbol: String, fallbackDigits: Int? = nil) throws -> FXBacktestSymbolExecutionSpec {
+        try settings.executionProfile.spec(
+            for: logicalSymbol,
+            fallbackDigits: fallbackDigits ?? digits,
+            settings: settings
+        )
     }
 }
 

@@ -40,6 +40,26 @@ public struct MovingAverageCrossPlugin: FXBacktestPluginV1 {
         MetalKernelV1(source: Self.metalSource, entryPoint: "moving_average_cross_v1", maxPassesPerCommandBuffer: 8_192)
     }
 
+    public var accelerationDescriptor: PluginAccelerationDescriptor {
+        PluginAccelerationDescriptor(
+            pluginIdentifier: descriptor.id,
+            supportedBackends: [.swiftScalar, .swiftSIMD, .metal],
+            metalEntryPoint: "moving_average_cross_v1",
+            ir: PluginAccelerationIR(
+                requiredColumns: [
+                    PluginAccelerationInputColumn(field: "close")
+                ],
+                operations: [
+                    PluginAccelerationIROperation(
+                        opcode: "moving_average_cross",
+                        inputs: ["close", "fast_period", "slow_period"],
+                        outputs: ["position_signal", "trade_ledger", "pass_metrics"]
+                    )
+                ]
+            )
+        )
+    }
+
     public func runPass(
         market: OhlcDataSeries,
         parameters: ParameterVector,

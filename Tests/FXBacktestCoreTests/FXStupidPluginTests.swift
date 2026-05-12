@@ -25,7 +25,7 @@ final class FXStupidPluginTests: XCTestCase {
 
     func testFXStupidRunsMonotonicEURUSDFlow() throws {
         let plugin = FXStupid()
-        let market = try monotonicMarket()
+        let market = try monotonicMarket(symbol: "EURUSD")
         let sweep = try ParameterSweep.singlePass(definitions: plugin.parameterDefinitions)
         let parameters = try sweep.parameterVector(at: 0)
         let context = BacktestContext(settings: BacktestRunSettings(), digits: market.metadata.digits)
@@ -38,7 +38,22 @@ final class FXStupidPluginTests: XCTestCase {
         XCTAssertGreaterThan(result.netProfit, 0)
     }
 
-    private func monotonicMarket() throws -> OhlcDataSeries {
+    func testFXStupidUsesLoadedMultiSymbolUniverse() throws {
+        let plugin = FXStupid()
+        let eurusd = try monotonicMarket(symbol: "EURUSD")
+        let usdjpy = try monotonicMarket(symbol: "USDJPY", digits: 3)
+        let universe = try OhlcMarketUniverse(primarySymbol: "EURUSD", series: [eurusd, usdjpy])
+        let sweep = try ParameterSweep.singlePass(definitions: plugin.parameterDefinitions)
+        let parameters = try sweep.parameterVector(at: 0)
+        let context = BacktestContext(settings: BacktestRunSettings(), digits: eurusd.metadata.digits)
+
+        let result = try plugin.runPass(marketUniverse: universe, parameters: parameters, context: context)
+
+        XCTAssertEqual(result.barsProcessed, universe.count)
+        XCTAssertGreaterThanOrEqual(result.totalTrades, 2)
+    }
+
+    private func monotonicMarket(symbol: String, digits: Int = 5) throws -> OhlcDataSeries {
         let count = 80
         let start = Int64(1_704_067_200)
         var utc = ContiguousArray<Int64>()
@@ -59,8 +74,8 @@ final class FXStupidPluginTests: XCTestCase {
         return try OhlcDataSeries(
             metadata: FXBacktestMarketMetadata(
                 brokerSourceId: "demo",
-                logicalSymbol: "EURUSD",
-                digits: 5,
+                logicalSymbol: symbol,
+                digits: digits,
                 firstUtc: utc.first,
                 lastUtc: utc.last
             ),

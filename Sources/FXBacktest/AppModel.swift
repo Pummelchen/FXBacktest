@@ -20,6 +20,43 @@ private enum StatusLogMode {
     case progress(BacktestProgress)
 }
 
+private actor BacktestResultPersistenceBuffer {
+    private let store: ClickHouseBacktestResultStore
+    private let runID: String
+    private let batchSize: Int
+    private var buffer: [BacktestPassResult] = []
+
+    private init(store: ClickHouseBacktestResultStore, runID: String, batchSize: Int) {
+        self.store = store
+        self.runID = runID
+        self.batchSize = max(1, batchSize)
+    }
+
+    static func start(store: ClickHouseBacktestResultStore, run: BacktestStoredRun, batchSize: Int = 500) async throws -> BacktestResultPersistenceBuffer {
+        try await store.startRun(run)
+        return BacktestResultPersistenceBuffer(store: store, runID: run.runID, batchSize: batchSize)
+    }
+
+    func append(_ result: BacktestPassResult) async throws {
+        buffer.append(result)
+        if buffer.count >= batchSize {
+            try await flush()
+        }
+    }
+
+    func finish(progress: BacktestProgress, status: String) async throws {
+        try await flush()
+        try await store.completeRun(runID: runID, progress: progress, status: status)
+    }
+
+    private func flush() async throws {
+        guard !buffer.isEmpty else { return }
+        let batch = buffer
+        try await store.appendResults(batch, runID: runID)
+        buffer.removeFirst(batch.count)
+    }
+}
+
 @MainActor
 final class AppModel: ObservableObject, @unchecked Sendable {
     let plugins = FXBacktestPluginRegistry.availablePlugins
@@ -36,13 +73,20 @@ final class AppModel: ObservableObject, @unchecked Sendable {
     @Published var apiURLText = "http://127.0.0.1:5066"
     @Published var brokerSourceId = "icmarkets-sc-mt5-4"
     @Published var logicalSymbol = "EURUSD"
+    @Published var logicalSymbolsText = "EURUSD"
     @Published var expectedMT5Symbol = "EURUSD"
     @Published var expectedDigits = 5
     @Published var utcStartInclusive: Int64 = 1_704_067_200
     @Published var utcEndExclusive: Int64 = 1_707_177_600
     @Published var maximumRows = 5_000_000
+    @Published var clickHouseURLText = "http://127.0.0.1:8123"
+    @Published var clickHouseDatabase = "fxbacktest"
+    @Published var clickHouseUsername = ""
+    @Published var clickHousePassword = ""
+    @Published var persistResultsToClickHouse = false
 
     @Published private(set) var market: OhlcDataSeries?
+    @Published private(set) var marketUniverse: OhlcMarketUniverse?
     @Published private(set) var results: [BacktestPassResult] = []
     @Published private(set) var resultInitialDeposit: Double = 10_000
     @Published private(set) var progress = BacktestProgress(completedPasses: 0, totalPasses: 0, elapsedSeconds: 0)
@@ -60,6 +104,9 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         self.selectedPluginID = first.id
         self.parameterRows = Self.rows(for: first)
         self.market = try? OhlcDataSeries.demoEURUSD()
+        if let market {
+            self.marketUniverse = market.universe
+        }
         if let market {
             self.statusText = "Loaded demo \(market.metadata.logicalSymbol) M1 data: \(market.count) bars"
         }
@@ -111,6 +158,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         }
         do {
             market = try OhlcDataSeries.demoEURUSD()
+            marketUniverse = market?.universe
             results = []
             resultInitialDeposit = initialDeposit
             if let market {
@@ -146,28 +194,38 @@ final class AppModel: ObservableObject, @unchecked Sendable {
             apiBaseURL: url,
             requestTimeoutSeconds: 120
         )
-        let request = FXExportHistoryRequest(
-            brokerSourceId: brokerSourceId,
-            logicalSymbol: logicalSymbol,
-            expectedMT5Symbol: expectedMT5Symbol,
-            expectedDigits: expectedDigits,
-            utcStartInclusive: utcStartInclusive,
-            utcEndExclusive: utcEndExclusive,
-            maximumRows: maximumRows
-        )
+        let symbols = parseSymbols()
+        let requests = symbols.map { symbol in
+            FXExportHistoryRequest(
+                brokerSourceId: brokerSourceId,
+                logicalSymbol: symbol,
+                expectedMT5Symbol: symbols.count == 1 ? expectedMT5Symbol : nil,
+                expectedDigits: symbols.count == 1 ? expectedDigits : nil,
+                utcStartInclusive: utcStartInclusive,
+                utcEndExclusive: utcEndExclusive,
+                maximumRows: maximumRows
+            )
+        }
+        let primarySymbol = symbols.first ?? logicalSymbol
 
-        dataLoadTask = Task.detached { [connection, request] in
+        dataLoadTask = Task.detached { [connection, requests, primarySymbol] in
             do {
-                let loaded = try await FXExportHistoryLoader().load(connection: connection, request: request)
+                let loadedUniverse = try await FXExportHistoryLoader().loadUniverse(
+                    connection: connection,
+                    requests: requests,
+                    primarySymbol: primarySymbol
+                )
+                let loaded = loadedUniverse.primary
                 let wasCancelled = Task.isCancelled
                 await MainActor.run {
                     if wasCancelled {
                         self.updateStatus("FXExport data load cancelled", log: .warning)
                     } else {
                         self.market = loaded
+                        self.marketUniverse = loadedUniverse
                         self.results = []
                         self.resultInitialDeposit = self.initialDeposit
-                        self.updateStatus("Loaded \(loaded.metadata.logicalSymbol) M1 data: \(loaded.count) verified bars", log: .success)
+                        self.updateStatus("Loaded \(loadedUniverse.symbols.joined(separator: ",")) M1 data: \(loaded.count) aligned verified bars", log: .success)
                     }
                     self.isLoadingData = false
                     self.dataLoadTask = nil
@@ -196,7 +254,7 @@ final class AppModel: ObservableObject, @unchecked Sendable {
             updateStatus("Wait for FXExport data loading to finish before running", log: .warning)
             return
         }
-        guard let market else {
+        guard let marketUniverse else {
             updateStatus("Load market data first", log: .warning)
             return
         }
@@ -213,13 +271,21 @@ final class AppModel: ObservableObject, @unchecked Sendable {
             return
         }
 
+        let executionProfile: FXBacktestExecutionProfile
+        do {
+            executionProfile = try makeExecutionProfile(for: marketUniverse)
+        } catch {
+            updateStatus(String(describing: error), log: .error)
+            return
+        }
         let settings = BacktestRunSettings(
             target: executionTarget,
             maxWorkers: maxWorkers,
             chunkSize: chunkSize,
             initialDeposit: initialDeposit,
             contractSize: contractSize,
-            lotSize: lotSize
+            lotSize: lotSize,
+            executionProfile: executionProfile
         )
         let plugin = selectedPlugin
         let optimizer = BacktestOptimizer()
@@ -232,14 +298,42 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         updateStatus("Running \(plugin.descriptor.displayName) on \(settings.target.rawValue.uppercased())...")
 
         runTask = Task {
+            let persistence = await startPersistenceIfEnabled(
+                plugin: plugin,
+                marketUniverse: marketUniverse,
+                sweep: sweep,
+                settings: settings
+            )
+            var finalProgress: BacktestProgress?
+            var completionStatus = "completed"
             do {
-                for try await event in optimizer.run(plugin: plugin, market: market, sweep: sweep, settings: settings) {
+                for try await event in optimizer.run(plugin: plugin, marketUniverse: marketUniverse, sweep: sweep, settings: settings) {
                     handle(event)
+                    switch event {
+                    case .passCompleted(let result, _):
+                        do {
+                            try await persistence?.append(result)
+                        } catch {
+                            updateStatus("ClickHouse persistence failed: \(error)", log: .error)
+                        }
+                    case .completed(let progress):
+                        finalProgress = progress
+                    case .started:
+                        break
+                    }
                 }
             } catch is CancellationError {
+                completionStatus = "cancelled"
                 updateStatus("Run cancelled", log: .warning)
             } catch {
+                completionStatus = "failed"
                 updateStatus(String(describing: error), log: .error)
+            }
+            let progressToPersist = finalProgress ?? self.progress
+            do {
+                try await persistence?.finish(progress: progressToPersist, status: completionStatus)
+            } catch {
+                updateStatus("ClickHouse completion update failed: \(error)", log: .error)
             }
             isRunning = false
             runTask = nil
@@ -340,8 +434,8 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         guard !brokerSourceId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw FXBacktestError.invalidParameter("Broker source id must not be empty.")
         }
-        guard !logicalSymbol.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw FXBacktestError.invalidParameter("Logical symbol must not be empty.")
+        guard !parseSymbols().isEmpty else {
+            throw FXBacktestError.invalidParameter("At least one logical symbol must be configured.")
         }
         guard (0...10).contains(expectedDigits) else {
             throw FXBacktestError.invalidParameter("Expected digits must be in 0...10.")
@@ -372,6 +466,95 @@ final class AppModel: ObservableObject, @unchecked Sendable {
         }
         guard lotSize.isFinite, lotSize > 0 else {
             throw FXBacktestError.invalidParameter("Lot size must be a finite value > 0.")
+        }
+        if persistResultsToClickHouse {
+            try makeClickHouseConfiguration().validate()
+        }
+    }
+
+    private func parseSymbols() -> [String] {
+        let source = logicalSymbolsText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? logicalSymbol : logicalSymbolsText
+        var seen = Set<String>()
+        var result: [String] = []
+        for raw in source.split(separator: ",", omittingEmptySubsequences: true) {
+            let symbol = raw.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+            guard !symbol.isEmpty, !seen.contains(symbol) else { continue }
+            seen.insert(symbol)
+            result.append(symbol)
+        }
+        return result
+    }
+
+    private func makeExecutionProfile(for universe: OhlcMarketUniverse) throws -> FXBacktestExecutionProfile {
+        var specs: [String: FXBacktestSymbolExecutionSpec] = [:]
+        for symbol in universe.symbols {
+            guard let series = universe[symbol] else { continue }
+            specs[symbol] = try FXBacktestSymbolExecutionSpec(
+                logicalSymbol: symbol,
+                mt5Symbol: symbol,
+                digits: series.metadata.digits,
+                contractSize: contractSize,
+                minLot: 0.01,
+                lotStep: 0.01,
+                maxLot: 100,
+                spreadPoints: 0,
+                slippagePoints: 0,
+                commissionPerLotPerSide: 0,
+                marginRate: 0
+            )
+        }
+        return try FXBacktestExecutionProfile(
+            brokerSourceId: brokerSourceId,
+            depositCurrency: "USD",
+            leverage: 100,
+            accountingMode: .hedging,
+            symbols: specs
+        )
+    }
+
+    private func makeClickHouseConfiguration() throws -> FXBacktestClickHouseConfiguration {
+        guard let url = URL(string: clickHouseURLText) else {
+            throw FXBacktestError.invalidParameter("Invalid ClickHouse URL.")
+        }
+        let username = clickHouseUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+        let password = clickHousePassword
+        let config = FXBacktestClickHouseConfiguration(
+            url: url,
+            database: clickHouseDatabase,
+            username: username.isEmpty ? nil : username,
+            password: password.isEmpty ? nil : password,
+            requestTimeoutSeconds: 60
+        )
+        try config.validate()
+        return config
+    }
+
+    private func startPersistenceIfEnabled(
+        plugin: AnyFXBacktestPlugin,
+        marketUniverse: OhlcMarketUniverse,
+        sweep: ParameterSweep,
+        settings: BacktestRunSettings
+    ) async -> BacktestResultPersistenceBuffer? {
+        guard persistResultsToClickHouse else { return nil }
+        do {
+            let config = try makeClickHouseConfiguration()
+            let store = ClickHouseBacktestResultStore(configuration: config)
+            let run = BacktestStoredRun(
+                pluginIdentifier: plugin.descriptor.id,
+                engine: settings.target,
+                brokerSourceId: brokerSourceId,
+                primarySymbol: marketUniverse.primarySymbol,
+                symbols: marketUniverse.symbols,
+                settings: settings,
+                sweep: sweep,
+                note: "FXBacktest interactive run"
+            )
+            let buffer = try await BacktestResultPersistenceBuffer.start(store: store, run: run)
+            updateStatus("ClickHouse result persistence started for run \(run.runID)", log: .success)
+            return buffer
+        } catch {
+            updateStatus("ClickHouse persistence disabled for this run: \(error)", log: .error)
+            return nil
         }
     }
 
@@ -428,6 +611,10 @@ extension AppModel {
                 try await loadFXExportFromTerminal(arguments)
             case "run", "optimize":
                 try await runFromTerminal(arguments)
+            case "save-results", "persist-results":
+                try await saveResultsFromTerminal(arguments)
+            case "clean-backtest-data", "purge-backtests", "purge-results":
+                try await cleanBacktestDataFromTerminal(arguments)
             case "stop", "cancel":
                 await stopActiveWorkAndWait(reason: "terminal stop command")
             case "set":
@@ -463,10 +650,14 @@ extension AppModel {
           params
           set <field> <value>
           set --api-url http://127.0.0.1:5066 --target cpu --workers 8
+          set --clickhouse-url http://127.0.0.1:8123 --clickhouse-db fxbacktest --persist-results true
           set-param <key> --input 12 --min 6 --step 2 --max 40
           load-demo
-          load-fxexport [--api-url URL] [--broker ID] [--symbol EURUSD] [--mt5-symbol EURUSD] [--digits 5] [--from UTC] [--to UTC] [--max-rows N]
+          load-fxexport [--api-url URL] [--broker ID] [--symbol EURUSD] [--symbols EURUSD,USDJPY] [--mt5-symbol EURUSD] [--digits 5] [--from UTC] [--to UTC] [--max-rows N]
           run [cpu|metal] [--workers N] [--chunk N] [--initial-deposit N] [--contract-size N] [--lot N]
+          save-results [--run-id ID] [--note TEXT]
+          clean-backtest-data --older-than-days 30
+          clean-backtest-data --all true
           stop
           reset-params
           help
@@ -475,6 +666,7 @@ extension AppModel {
         State-changing commands gracefully stop active work before changing the app state.
         FXBacktest has no launch-time options; use this resident command shell after startup.
         FXBacktest must load Forex history only through FXExport API v1, never ClickHouse directly.
+        ClickHouse access is allowed only through FXBacktest's result-store API for optimization results.
         """
     }
 
@@ -521,6 +713,78 @@ extension AppModel {
         }
         try applyConfigurationOptions(parsed.options, allowedGroup: .run)
         runOptimization()
+    }
+
+    private func saveResultsFromTerminal(_ arguments: ArraySlice<String>) async throws {
+        let parsed = try ParsedTerminalOptions(tokens: arguments)
+        guard parsed.positionals.isEmpty else {
+            throw TerminalCommandError.invalidValue("save-results accepts options only.")
+        }
+        let allowedOptions: Set<String> = ["run-id", "run", "note"]
+        for key in parsed.options.keys where !allowedOptions.contains(key) {
+            throw TerminalCommandError.unknownOption(key)
+        }
+        guard !results.isEmpty else {
+            throw TerminalCommandError.invalidValue("No pass results are currently held in memory.")
+        }
+        let runID = parsed.options["run-id"] ?? parsed.options["run"] ?? UUID().uuidString
+        let note = parsed.options["note"]
+        let config = try makeClickHouseConfiguration()
+        let store = ClickHouseBacktestResultStore(configuration: config)
+        let sweep = try makeSweep()
+        let activeUniverse = marketUniverse ?? market?.universe
+        guard let activeUniverse else {
+            throw TerminalCommandError.invalidValue("Load market data before saving results.")
+        }
+        let settings = BacktestRunSettings(
+            target: executionTarget,
+            maxWorkers: maxWorkers,
+            chunkSize: chunkSize,
+            initialDeposit: resultInitialDeposit,
+            contractSize: contractSize,
+            lotSize: lotSize,
+            executionProfile: try makeExecutionProfile(for: activeUniverse)
+        )
+        let run = BacktestStoredRun(
+            runID: runID,
+            pluginIdentifier: selectedPlugin.descriptor.id,
+            engine: executionTarget,
+            brokerSourceId: brokerSourceId,
+            primarySymbol: activeUniverse.primarySymbol,
+            symbols: activeUniverse.symbols,
+            settings: settings,
+            sweep: sweep,
+            note: note
+        )
+        updateStatus("Saving \(results.count.formatted()) held pass results to ClickHouse run \(runID)...")
+        try await store.startRun(run)
+        try await store.appendResults(results, runID: runID)
+        try await store.completeRun(runID: runID, progress: progress, status: isRunning ? "snapshot" : "completed")
+        updateStatus("Saved \(results.count.formatted()) pass results to ClickHouse run \(runID)", log: .success)
+    }
+
+    private func cleanBacktestDataFromTerminal(_ arguments: ArraySlice<String>) async throws {
+        let parsed = try ParsedTerminalOptions(tokens: arguments)
+        guard parsed.positionals.isEmpty else {
+            throw TerminalCommandError.invalidValue("clean-backtest-data accepts options only.")
+        }
+        let allowedOptions: Set<String> = ["all", "older-than-days", "days"]
+        for key in parsed.options.keys where !allowedOptions.contains(key) {
+            throw TerminalCommandError.unknownOption(key)
+        }
+        let config = try makeClickHouseConfiguration()
+        let store = ClickHouseBacktestResultStore(configuration: config)
+        try await store.ensureSchema()
+        let report: BacktestResultPurgeReport
+        if let all = parsed.options["all"], try parseBool(all, name: "all") {
+            report = try await store.purgeAll()
+        } else if let daysValue = parsed.options["older-than-days"] ?? parsed.options["days"] {
+            let days = try parseInt(daysValue, name: "older-than-days", minimum: 1)
+            report = try await store.purge(olderThanDays: days)
+        } else {
+            throw TerminalCommandError.invalidValue("Use clean-backtest-data --older-than-days N or clean-backtest-data --all true.")
+        }
+        updateStatus("Cleaned ClickHouse backtest result data scope \(report.scope)", log: .success)
     }
 
     private func setFromTerminal(_ arguments: ArraySlice<String>) async throws {
@@ -630,10 +894,16 @@ extension AppModel {
             guard URL(string: value) != nil else {
                 throw TerminalCommandError.invalidValue("api-url must be a valid URL.")
             }
-        case "broker", "symbol", "mt5-symbol":
+        case "broker", "symbol", "symbols", "mt5-symbol", "clickhouse-db", "clickhouse-user", "clickhouse-password":
             guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw TerminalCommandError.invalidValue("\(key) must not be empty.")
             }
+        case "clickhouse-url":
+            guard URL(string: value) != nil else {
+                throw TerminalCommandError.invalidValue("clickhouse-url must be a valid URL.")
+            }
+        case "persist-results":
+            _ = try parseBool(value, name: key)
         case "digits":
             _ = try parseInt(value, name: key, range: 0...10)
         case "from", "to":
@@ -662,6 +932,14 @@ extension AppModel {
             brokerSourceId = value
         case "symbol":
             logicalSymbol = value.uppercased()
+            logicalSymbolsText = logicalSymbol
+            expectedMT5Symbol = logicalSymbol
+        case "symbols":
+            logicalSymbolsText = value.uppercased()
+            if let first = parseSymbols().first {
+                logicalSymbol = first
+                expectedMT5Symbol = first
+            }
         case "mt5-symbol":
             expectedMT5Symbol = value
         case "digits":
@@ -684,6 +962,16 @@ extension AppModel {
             contractSize = try parseDouble(value, name: key, minimum: 0)
         case "lot":
             lotSize = try parseDouble(value, name: key, minimum: 0)
+        case "clickhouse-url":
+            clickHouseURLText = value
+        case "clickhouse-db":
+            clickHouseDatabase = value
+        case "clickhouse-user":
+            clickHouseUsername = value
+        case "clickhouse-password":
+            clickHousePassword = value
+        case "persist-results":
+            persistResultsToClickHouse = try parseBool(value, name: key)
         default:
             throw TerminalCommandError.unknownOption(key)
         }
@@ -691,8 +979,9 @@ extension AppModel {
 
     private func canonicalAllowedConfigurationKey(_ key: String, allowedGroup: ConfigurationGroup) throws -> String {
         let canonical = canonicalKey(key)
-        let dataKeys: Set<String> = ["api-url", "broker", "symbol", "mt5-symbol", "digits", "from", "to", "max-rows"]
+        let dataKeys: Set<String> = ["api-url", "broker", "symbol", "symbols", "mt5-symbol", "digits", "from", "to", "max-rows"]
         let runKeys: Set<String> = ["target", "workers", "chunk", "initial-deposit", "contract-size", "lot"]
+        let storageKeys: Set<String> = ["clickhouse-url", "clickhouse-db", "clickhouse-user", "clickhouse-password", "persist-results"]
         switch allowedGroup {
         case .data where !dataKeys.contains(canonical):
             throw TerminalCommandError.unknownOption(key)
@@ -701,7 +990,7 @@ extension AppModel {
         default:
             break
         }
-        guard dataKeys.contains(canonical) || runKeys.contains(canonical) else {
+        guard dataKeys.contains(canonical) || runKeys.contains(canonical) || storageKeys.contains(canonical) else {
             throw TerminalCommandError.unknownOption(key)
         }
         return canonical
@@ -715,6 +1004,8 @@ extension AppModel {
             return "broker"
         case "symbol", "logical-symbol", "logical_symbol":
             return "symbol"
+        case "symbols", "logical-symbols", "logical_symbols", "fxpairs":
+            return "symbols"
         case "mt5", "mt5-symbol", "expected-mt5-symbol", "expected_mt5_symbol":
             return "mt5-symbol"
         case "digits", "expected-digits", "expected_digits":
@@ -737,6 +1028,16 @@ extension AppModel {
             return "contract-size"
         case "lot", "lot-size", "lot_size":
             return "lot"
+        case "clickhouse-url", "clickhouse_url", "ch-url", "ch_url":
+            return "clickhouse-url"
+        case "clickhouse-db", "clickhouse-database", "clickhouse_database", "ch-db", "database":
+            return "clickhouse-db"
+        case "clickhouse-user", "clickhouse-username", "clickhouse_username", "ch-user":
+            return "clickhouse-user"
+        case "clickhouse-password", "clickhouse_pass", "clickhouse-pass", "ch-password", "ch-pass":
+            return "clickhouse-password"
+        case "persist", "persist-results", "persist_results", "clickhouse-persist":
+            return "persist-results"
         case "minimum":
             return "min"
         case "maximum":
@@ -783,6 +1084,17 @@ extension AppModel {
         return parsed
     }
 
+    private func parseBool(_ value: String, name: String) throws -> Bool {
+        switch value.lowercased() {
+        case "true", "yes", "1", "on", "enabled":
+            return true
+        case "false", "no", "0", "off", "disabled":
+            return false
+        default:
+            throw TerminalCommandError.invalidValue("\(name) must be true or false.")
+        }
+    }
+
     private func statusSummary() -> String {
         let state: String
         if isRunning {
@@ -793,7 +1105,10 @@ extension AppModel {
             state = "idle"
         }
         let marketText: String
-        if let market {
+        if let marketUniverse {
+            let primary = marketUniverse.primary
+            marketText = "\(marketUniverse.symbols.joined(separator: ",")) \(primary.metadata.timeframe), \(primary.count.formatted()) aligned bars, primary \(marketUniverse.primarySymbol)"
+        } else if let market {
             marketText = "\(market.metadata.logicalSymbol) \(market.metadata.timeframe), \(market.count.formatted()) bars, digits \(market.metadata.digits)"
         } else {
             marketText = "none"
@@ -812,6 +1127,7 @@ extension AppModel {
           Plugin: \(selectedPlugin.descriptor.displayName) (\(selectedPlugin.id))
           Market: \(marketText)
           Engine: \(executionTarget.rawValue), workers \(maxWorkers), chunk \(chunkSize)
+          ClickHouse persistence: \(persistResultsToClickHouse ? "enabled" : "disabled")
           Sweep combinations: \(sweepText)
           Progress: \(progress.completedPasses.formatted()) / \(progress.totalPasses.formatted())
           Results held: \(results.count.formatted())
@@ -824,7 +1140,8 @@ extension AppModel {
         FXBacktest settings
           FXExport API: \(apiURLText)
           Broker: \(brokerSourceId)
-          Symbol: \(logicalSymbol), MT5 \(expectedMT5Symbol), digits \(expectedDigits)
+          Symbols: \(logicalSymbolsText)
+          Single-symbol validation: MT5 \(expectedMT5Symbol), digits \(expectedDigits)
           UTC range: \(utcStartInclusive) ..< \(utcEndExclusive)
           Maximum rows: \(maximumRows.formatted())
           Engine: \(executionTarget.rawValue)
@@ -833,13 +1150,15 @@ extension AppModel {
           Initial deposit: \(initialDeposit)
           Contract size: \(contractSize)
           Lot size: \(lotSize)
+          ClickHouse results: \(clickHouseURLText), database \(clickHouseDatabase), user \(clickHouseUsername.isEmpty ? "(none)" : clickHouseUsername), password \(clickHousePassword.isEmpty ? "(not set)" : "(set)"), auto-persist \(persistResultsToClickHouse)
         """
     }
 
     private func pluginSummary() -> String {
         let lines = plugins.map { plugin in
             let metal = plugin.descriptor.supportsMetal ? "metal" : "cpu-only"
-            return "  \(plugin.id) - \(plugin.descriptor.displayName) \(plugin.descriptor.version) [\(metal)]"
+            let acceleration = plugin.accelerationDescriptor.supportedBackends.map(\.rawValue).joined(separator: ",")
+            return "  \(plugin.id) - \(plugin.descriptor.displayName) \(plugin.descriptor.version) [\(metal); accel \(acceleration)]"
         }
         return (["EA plugins:"] + lines).joined(separator: "\n")
     }
